@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s https://code.claude.com/docs/en/sub-agents.md)"
+    ]
+  }
+}

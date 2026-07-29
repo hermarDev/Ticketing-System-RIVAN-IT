@@ -1,0 +1,1607 @@
+import DOMPurify from 'isomorphic-dompurify'
+import { isSupabaseConfigured, signOutLocal, supabase } from './supabaseClient'
+import { generateClientId, generateTicketId } from './idGenerators'
+import { logger } from './logger'
+import { dispatchNotification } from './notificationService'
+
+export {
+  setActiveTicketId,
+  isTicketActive,
+  getNotificationLogs,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+  clearNotificationLogs,
+  getUnreadNotificationCount,
+} from './notificationService'
+
+/**
+ * Plain-text sanitization using DOMPurify: strips all HTML tags and attributes,
+ * trims whitespace, and enforces maxLength. Output is plain text for storage /
+ * React-escaped display only. Nullish and non-string values become `''`.
+ *
+ * @param {*} str - Raw user input
+ * @param {number} [maxLength=5000] - Maximum length of the returned string
+ * @returns {string}
+ */
+export function sanitizeInput(str, maxLength = 5000) {
+  if (typeof str !== 'string') return ''
+  const clean = DOMPurify.sanitize(str, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] })
+  return clean.trim().slice(0, maxLength)
+}
+
+// Local storage keys for fallback offline mode
+const LOCAL_STORAGE_TICKETS = 'netops_tickets_v1'
+const LOCAL_STORAGE_ACCOUNTS = 'netops_accounts_v1'
+const LOCAL_STORAGE_REPLIES = 'netops_replies_v1'
+const LOCAL_STORAGE_SESSION_CLIENT = 'netops_session_client_v1'
+
+const getLocalData = (key, defaultValue = []) => {
+  try {
+    const data = localStorage.getItem(key)
+    return data ? JSON.parse(data) : defaultValue
+  } catch (e) {
+    logger.error('Error reading localStorage:', e)
+    return defaultValue
+  }
+}
+
+const setLocalData = (key, value) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch (e) {
+    logger.error('Error saving to localStorage:', e)
+  }
+}
+
+/**
+ * Returns true if the string matches the standard UUID format (any version).
+ * @param {*} str - Value to test
+ * @returns {boolean}
+ */
+export const isUUID = (str) =>
+  typeof str === 'string' &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str)
+
+/**
+ * Resolves a staff value to a display name string.
+ * @param {string|Object|null} staff - Staff string name or profile object
+ * @returns {string}
+ */
+export const getStaffDisplayName = (staff) => {
+  if (!staff) return ''
+  if (typeof staff === 'string') return staff.trim()
+  return (
+    staff.full_name ||
+    staff.fullName ||
+    staff.name ||
+    staff.email ||
+    ''
+  ).trim()
+}
+
+/**
+ * Resolves a staff value to a UUID assignment ID, or null if not applicable.
+ * @param {string|Object|null} staff - Staff UUID string or profile object with id
+ * @returns {string|null}
+ */
+export const getStaffAssignmentId = (staff) => {
+  if (!staff) return null
+  if (typeof staff === 'string') return isUUID(staff.trim()) ? staff.trim() : null
+  return isUUID(staff.id) ? staff.id : null
+}
+
+/**
+ * Resolves staff input into an assignment target without hitting the database.
+ * Empty / falsy staff means unassign (`id` and `lookupName` both null).
+ * A known UUID sets `id`; a display name or email sets `lookupName` for a profiles query.
+ *
+ * @param {string|Object|null|undefined} staff
+ * @returns {{ id: string|null, lookupName: string|null }}
+ */
+export function resolveStaffAssignmentTarget(staff) {
+  if (staff == null || staff === false) {
+    return { id: null, lookupName: null }
+  }
+  if (typeof staff === 'string') {
+    const trimmed = staff.trim()
+    if (!trimmed) return { id: null, lookupName: null }
+    if (isUUID(trimmed)) return { id: trimmed, lookupName: null }
+    return { id: null, lookupName: trimmed }
+  }
+  const id = getStaffAssignmentId(staff)
+  if (id) return { id, lookupName: null }
+  const name = getStaffDisplayName(staff)
+  if (!name) return { id: null, lookupName: null }
+  return { id: null, lookupName: name }
+}
+
+/** Canonical ticket statuses matching supabase/schema.sql CHECK constraint. */
+export const TICKET_STATUSES = Object.freeze([
+  'New',
+  'In Progress',
+  'Pending Client',
+  'Resolved',
+  'Closed',
+])
+
+const TICKET_STATUS_SET = new Set(TICKET_STATUSES)
+
+/** Legacy UI labels mapped to canonical statuses before persistence. */
+const LEGACY_STATUS_ALIASES = Object.freeze({
+  Open: 'New',
+})
+
+/**
+ * Normalizes a ticket status for persistence: trims, maps legacy aliases
+ * (e.g. "Open" → "New"), and returns null when the value is not allowlisted.
+ * Does not treat "In Progress" as Resolved/Closed.
+ *
+ * @param {*} status - Raw status string
+ * @returns {string|null} Canonical status or null if invalid
+ */
+export function normalizeTicketStatus(status) {
+  if (typeof status !== 'string') return null
+  const trimmed = status.trim()
+  if (!trimmed) return null
+  const mapped = LEGACY_STATUS_ALIASES[trimmed] || trimmed
+  return TICKET_STATUS_SET.has(mapped) ? mapped : null
+}
+
+async function getStaffNameMap(staffIds) {
+  const uniqueIds = [...new Set(staffIds.filter(Boolean))]
+  if (!uniqueIds.length || !isSupabaseConfigured || !supabase) return new Map()
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, full_name, email')
+    .in('id', uniqueIds)
+
+  if (error) {
+    logger.warn('Supabase staff profile lookup error:', error.message)
+    return new Map()
+  }
+
+  return new Map(
+    (data || []).map((profile) => [
+      profile.id,
+      profile.full_name || profile.email || profile.id,
+    ])
+  )
+}
+
+/**
+ * Looks up a staff/admin/ceo profile id by exact full_name or email (case-insensitive).
+ * Returns null when no match is found or Supabase is unavailable.
+ * @param {string} nameOrEmail
+ * @returns {Promise<string|null>}
+ */
+async function lookupStaffIdByNameOrEmail(nameOrEmail) {
+  const needle = typeof nameOrEmail === 'string' ? nameOrEmail.trim() : ''
+  if (!needle || !isSupabaseConfigured || !supabase) return null
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, full_name, email')
+    .in('role', ['staff', 'admin', 'ceo'])
+
+  if (error) {
+    logger.warn('Supabase staff name lookup error:', error.message)
+    return null
+  }
+
+  const needleLower = needle.toLowerCase()
+  const match = (data || []).find((profile) => {
+    const fullName = (profile.full_name || '').trim().toLowerCase()
+    const email = (profile.email || '').trim().toLowerCase()
+    return fullName === needleLower || email === needleLower
+  })
+
+  return match?.id || null
+}
+
+/**
+ * Resolves staff input to a UUID for `tickets.assigned_to`, or null to unassign.
+ * Never returns a non-UUID string.
+ * @param {string|Object|null|undefined} staff
+ * @returns {Promise<string|null>}
+ * @throws {Error} When a non-empty name/email cannot be matched to a staff profile
+ */
+async function resolveAssignedToUuid(staff) {
+  const target = resolveStaffAssignmentTarget(staff)
+  if (target.id) return target.id
+  if (!target.lookupName) return null
+
+  const lookedUp = await lookupStaffIdByNameOrEmail(target.lookupName)
+  if (!lookedUp) {
+    throw new Error(`No staff profile found for "${target.lookupName}"`)
+  }
+  return lookedUp
+}
+
+function formatTicketRow(t, staffNameMap = new Map()) {
+  const assignedToId = t.assigned_to || null
+  const resolvedName = assignedToId
+    ? (staffNameMap.get(assignedToId) || '')
+    : ''
+  return {
+    id: t.id,
+    ticketNumber: t.ticket_number,
+    clientName: t.client_name,
+    companyName: t.company_name,
+    email: t.email,
+    phone: t.phone,
+    category: t.category,
+    priority: t.priority,
+    subject: t.subject,
+    description: t.description,
+    attachment: t.attachment || '',
+    assignedTo: resolvedName,
+    assignedToId: assignedToId && isUUID(String(assignedToId)) ? assignedToId : null,
+    status: t.status,
+    createdAt: t.created_at,
+  }
+}
+
+/**
+ * Persists the current client session object to local storage, or clears it if null.
+ * @param {Object|null} account - Client account object or null to clear
+ * @returns {void}
+ */
+export function saveCurrentClientSession(account) {
+  if (account) {
+    setLocalData(LOCAL_STORAGE_SESSION_CLIENT, account)
+  } else {
+    try {
+      localStorage.removeItem(LOCAL_STORAGE_SESSION_CLIENT)
+    } catch {}
+  }
+}
+
+/**
+ * Retrieves the persisted client session from local storage.
+ * @returns {Object|null}
+ */
+export function getCurrentClientSession() {
+  return getLocalData(LOCAL_STORAGE_SESSION_CLIENT, null)
+}
+
+/**
+ * Creates a new client account via Supabase Auth and inserts a matching `clients` row.
+ * Falls back to local storage when Supabase is not configured.
+ * @param {Object} accountData - Registration form fields (email, password, firstName, lastName, etc.)
+ * @returns {Promise<Object>} Created client profile object
+ */
+export async function createAccount(accountData) {
+  if (isSupabaseConfigured && supabase) {
+    // 1. Create auth user with Supabase Auth
+    const { data: authData, error: authError } = await supabase.auth.signUp({
+      email: accountData.email.toLowerCase().trim(),
+      password: accountData.password,
+    })
+
+    if (authError) {
+      if (authError.message?.includes('already registered')) {
+        throw new Error('An account with this email already exists. Please log in instead.')
+      }
+      throw new Error(authError.message)
+    }
+
+    const generatedClientId = generateClientId()
+    const firstName = sanitizeInput(accountData.firstName || '', 100)
+    const lastName = sanitizeInput(accountData.lastName || '', 100)
+    const fullName = sanitizeInput(accountData.fullName || `${firstName} ${lastName}`, 200).trim()
+
+    // 2. Insert client profile row linked to auth user
+    const { data, error } = await supabase
+      .from('clients')
+      .insert([
+        {
+          client_id: generatedClientId,
+          auth_user_id: authData.user?.id || null,
+          first_name: firstName,
+          last_name: lastName,
+          full_name: fullName,
+          company_name: sanitizeInput(accountData.companyName, 200),
+          email: accountData.email.toLowerCase().trim(),
+          phone: sanitizeInput(accountData.phone, 20),
+          site_address: sanitizeInput(accountData.siteAddress, 500),
+        },
+      ])
+      .select()
+      .single()
+
+    if (error) {
+      if (authData.user?.id) {
+        try {
+          await supabase.auth.admin.deleteUser(authData.user.id)
+        } catch (cleanupErr) {
+          logger.warn('Could not clean up orphaned auth user after client insert failure:', cleanupErr.message)
+        }
+      }
+      if (error.code === '23505') {
+        throw new Error('An account with this email already exists. Please log in instead.')
+      }
+      throw new Error(error.message)
+    }
+
+    // 3. Ensure security profile row exists with role = 'client'
+    if (authData.user?.id) {
+      await supabase.from('profiles').upsert([
+        {
+          id: authData.user.id,
+          first_name: firstName,
+          last_name: lastName,
+          full_name: fullName,
+          email: accountData.email.toLowerCase().trim(),
+          phone: sanitizeInput(accountData.phone, 20),
+          company_name: sanitizeInput(accountData.companyName, 200),
+          role: 'client',
+        },
+      ], { onConflict: 'id', ignoreDuplicates: true })
+    }
+
+    return {
+      id: data.id,
+      clientId: data.client_id,
+      firstName: data.first_name || firstName,
+      lastName: data.last_name || lastName,
+      fullName: data.full_name || fullName,
+      companyName: data.company_name,
+      email: data.email,
+      phone: data.phone,
+      siteAddress: data.site_address,
+    }
+  }
+
+  // Fallback: local storage (development only)
+  const accounts = getLocalData(LOCAL_STORAGE_ACCOUNTS, [])
+  const existing = accounts.find(
+    (a) => a.email?.toLowerCase() === accountData.email?.toLowerCase().trim()
+  )
+  if (existing) {
+    throw new Error('An account with this email already exists. Please log in instead.')
+  }
+
+  const firstName = sanitizeInput(accountData.firstName || '', 100)
+  const lastName = sanitizeInput(accountData.lastName || '', 100)
+  const fullName = sanitizeInput(accountData.fullName || `${firstName} ${lastName}`, 200).trim()
+
+  const newAccount = {
+    id: crypto.randomUUID(),
+    clientId: generateClientId(),
+    firstName,
+    lastName,
+    fullName,
+    companyName: sanitizeInput(accountData.companyName, 200),
+    email: accountData.email.toLowerCase().trim(),
+    phone: sanitizeInput(accountData.phone, 20),
+    siteAddress: sanitizeInput(accountData.siteAddress, 500),
+    createdAt: new Date().toISOString(),
+  }
+  accounts.push(newAccount)
+  setLocalData(LOCAL_STORAGE_ACCOUNTS, accounts)
+  return newAccount
+}
+
+/**
+ * Updates a client account profile by email in Supabase and syncs the profiles table.
+ * @param {string} email - Client email used as lookup key
+ * @param {Object} updateData - Fields to update (firstName, lastName, companyName, phone, siteAddress)
+ * @returns {Promise<Object>} Updated client profile object
+ */
+export async function updateClientAccount(email, updateData) {
+  const normalizedEmail = email?.toLowerCase().trim()
+  if (!normalizedEmail) throw new Error('Email is required to update account.')
+
+  const firstName = sanitizeInput(updateData.firstName || '', 100)
+  const lastName = sanitizeInput(updateData.lastName || '', 100)
+  const fullName = (updateData.fullName || `${firstName} ${lastName}`).trim()
+  const companyName = sanitizeInput(updateData.companyName || updateData.company || '', 200)
+  const phone = sanitizeInput(updateData.phone || '', 20)
+  const siteAddress = sanitizeInput(updateData.siteAddress || '', 500)
+
+  if (isSupabaseConfigured && supabase) {
+    const updatePayload = {
+      first_name: firstName,
+      last_name: lastName,
+      full_name: fullName,
+      company_name: companyName,
+      phone,
+      site_address: siteAddress,
+    }
+
+    const { data, error } = await supabase
+      .from('clients')
+      .update(updatePayload)
+      .eq('email', normalizedEmail)
+      .select()
+      .single()
+
+    if (error) {
+      logger.error('Supabase updateClientAccount error:', error)
+      throw new Error(error.message)
+    }
+
+    // Keep public.profiles in sync
+    const { data: sessionData } = await supabase.auth.getSession()
+    if (sessionData?.session?.user?.id) {
+      const { error: profileSyncError } = await supabase
+        .from('profiles')
+        .update({
+          first_name: firstName,
+          last_name: lastName,
+          full_name: fullName,
+          company_name: companyName,
+          phone,
+        })
+        .eq('id', sessionData.session.user.id)
+      if (profileSyncError) {
+        logger.warn('Failed to sync profiles table during account update:', profileSyncError.message)
+      }
+    }
+
+    return {
+      id: data.id,
+      clientId: data.client_id,
+      firstName: data.first_name || firstName,
+      lastName: data.last_name || lastName,
+      fullName: data.full_name || fullName,
+      companyName: data.company_name || companyName,
+      email: data.email,
+      phone: data.phone || phone,
+      siteAddress: data.site_address || siteAddress,
+    }
+  }
+
+  // Fallback: local storage
+  const accounts = getLocalData(LOCAL_STORAGE_ACCOUNTS, [])
+  const updatedAccounts = accounts.map((a) => {
+    if (a.email?.toLowerCase() === normalizedEmail) {
+      return {
+        ...a,
+        firstName,
+        lastName,
+        fullName,
+        companyName,
+        phone,
+        siteAddress,
+      }
+    }
+    return a
+  })
+  setLocalData(LOCAL_STORAGE_ACCOUNTS, updatedAccounts)
+
+  const updatedAcc = updatedAccounts.find((a) => a.email?.toLowerCase() === normalizedEmail)
+  return updatedAcc || { firstName, lastName, fullName, companyName, email: normalizedEmail, phone, siteAddress }
+}
+
+
+/**
+ * Authenticates a client with email and password via Supabase Auth.
+ * @param {string} email - Client email address
+ * @param {string} password - Client password
+ * @returns {Promise<Object>} Client profile object on success
+ */
+export async function loginClient(email, password) {
+  const normalizedEmail = email.toLowerCase().trim()
+
+  if (isSupabaseConfigured && supabase) {
+    // Authenticate with Supabase Auth
+    const { error: authError } = await supabase.auth.signInWithPassword({
+      email: normalizedEmail,
+      password,
+    })
+
+    if (authError) {
+      throw new Error('Invalid email or password. Please try again.')
+    }
+
+    // Fetch client profile
+    const { data, error } = await supabase
+      .from('clients')
+      .select('*')
+      .eq('email', normalizedEmail)
+      .single()
+
+    if (error || !data) {
+      await signOutLocal()
+      throw new Error('No client profile found. Please create an account first.')
+    }
+
+    const firstName = data.first_name || (data.full_name ? data.full_name.split(' ')[0] : '')
+    const lastName = data.last_name || (data.full_name ? data.full_name.split(' ').slice(1).join(' ') : '')
+
+    return {
+      id: data.id,
+      clientId: data.client_id,
+      firstName,
+      lastName,
+      fullName: data.full_name || `${firstName} ${lastName}`.trim(),
+      companyName: data.company_name,
+      email: data.email,
+      phone: data.phone,
+      siteAddress: data.site_address,
+    }
+  }
+
+  // DEV-ONLY FALLBACK: No password verification — local storage has no auth.
+  // This path is only reachable when Supabase is not configured.
+  console.warn('[DEV-ONLY] loginClient: local-storage fallback — no password verification is performed. Do NOT use in production.')
+  const accounts = getLocalData(LOCAL_STORAGE_ACCOUNTS, [])
+  const found = accounts.find((a) => a.email?.toLowerCase() === normalizedEmail)
+  if (!found) {
+    throw new Error('No account found with that email. Please create an account first.')
+  }
+  return found
+}
+
+/**
+ * Signs out the current client from Supabase Auth and clears the local session.
+ * Uses local scope so an ops-portal session in the same browser profile is preserved.
+ * @returns {Promise<void>}
+ */
+export async function logoutClient() {
+  if (isSupabaseConfigured && supabase) {
+    try {
+      await signOutLocal()
+    } catch (err) {
+      logger.error('Supabase signOut error:', err)
+    }
+  }
+  try {
+    localStorage.removeItem(LOCAL_STORAGE_SESSION_CLIENT)
+  } catch (e) {
+    logger.error('Error removing client session from localStorage:', e)
+  }
+}
+
+/**
+ * Initiates Google OAuth sign-in via Supabase Auth with redirect to origin.
+ * @returns {Promise<Object>} OAuth redirect data from Supabase
+ */
+export async function loginWithGoogle() {
+  if (isSupabaseConfigured && supabase) {
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: window.location.origin,
+      },
+    })
+    if (error) {
+      throw new Error(error.message)
+    }
+    return data
+  }
+  throw new Error('Supabase is not configured. Please set your credentials in .env file.')
+}
+
+/**
+ * Sends a password recovery email via Supabase Auth.
+ * Uses Supabase Auth's built-in recovery flow; no app-table changes required.
+ * @param {string} email
+ * @param {string} [redirectTo] - URL Supabase should redirect to after link click
+ * @returns {Promise<void>}
+ */
+export async function requestPasswordResetForEmail(email, redirectTo) {
+  const normalizedEmail = email?.toLowerCase().trim()
+  if (!normalizedEmail) throw new Error('Please enter a valid email address.')
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error('Supabase is not configured. Please set your credentials in .env file.')
+  }
+
+  const redirectUrl = redirectTo || (typeof window !== 'undefined' ? window.location.href : undefined)
+  const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo: redirectUrl })
+  if (error) throw new Error(error.message || 'Failed to send password reset email.')
+}
+
+/**
+ * Completes password recovery for the current user session embedded in the URL.
+ * @param {string} newPassword
+ * @returns {Promise<void>}
+ */
+export async function completePasswordRecovery(newPassword) {
+  const password = String(newPassword || '')
+  if (!password || password.length < 8) {
+    throw new Error('Password must be at least 8 characters.')
+  }
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error('Supabase is not configured. Please set your credentials in .env file.')
+  }
+
+  const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
+  if (sessionError || !sessionData?.session) {
+    throw new Error('Invalid or expired recovery link. Please request a new reset email.')
+  }
+
+  const { error: updateError } = await supabase.auth.updateUser({ password })
+  if (updateError) throw new Error(updateError.message || 'Failed to update password.')
+}
+
+/**
+ * Synchronizes an OAuth auth user with the `clients` table, auto-creating a row on first login.
+ * @param {Object} authUser - Supabase Auth user object from the OAuth session
+ * @returns {Promise<Object|null>} Client profile object, or null for staff/admin users
+ */
+export async function syncOAuthUser(authUser) {
+  if (!authUser || !isSupabaseConfigured || !supabase) return null
+
+  const email = authUser.email?.toLowerCase().trim()
+  if (!email) return null
+
+  try {
+    // 0. Check if this auth user has a profile in profiles table
+    const { data: userProfile } = await supabase
+      .from('profiles')
+      .select('id, role')
+      .eq('id', authUser.id)
+      .maybeSingle()
+
+    if (userProfile && ['staff', 'admin', 'ceo'].includes(userProfile.role)) {
+      // User is a Staff/Admin/CEO member, NOT a client
+      return null
+    }
+
+    const fullName = authUser.user_metadata?.full_name || authUser.user_metadata?.name || email.split('@')[0]
+    const nameParts = fullName.split(' ')
+    const firstName = authUser.user_metadata?.first_name || nameParts[0] || 'Client'
+    const lastName = authUser.user_metadata?.last_name || nameParts.slice(1).join(' ') || ''
+
+    if (!userProfile) {
+      await supabase.from('profiles').upsert([
+        {
+          id: authUser.id,
+          first_name: firstName,
+          last_name: lastName,
+          full_name: fullName,
+          email: email,
+          role: 'client',
+        },
+      ], { onConflict: 'id', ignoreDuplicates: true })
+    }
+
+    // 1. Try to fetch existing client row by email
+    const { data: existingClient } = await supabase
+      .from('clients')
+      .select('*')
+      .eq('email', email)
+      .maybeSingle()
+
+    if (existingClient) {
+      const firstName = existingClient.first_name || (existingClient.full_name ? existingClient.full_name.split(' ')[0] : '')
+      const lastName = existingClient.last_name || (existingClient.full_name ? existingClient.full_name.split(' ').slice(1).join(' ') : '')
+      return {
+        id: existingClient.id,
+        clientId: existingClient.client_id,
+        firstName,
+        lastName,
+        fullName: existingClient.full_name || `${firstName} ${lastName}`.trim(),
+        companyName: existingClient.company_name || 'Client',
+        email: existingClient.email,
+        phone: existingClient.phone || '',
+        siteAddress: existingClient.site_address || '',
+      }
+    }
+
+    // 2. Auto-create client profile row for first-time Google OAuth user
+    const generatedClientId = generateClientId()
+
+    const { data: newClient, error } = await supabase
+      .from('clients')
+      .upsert([
+        {
+          client_id: generatedClientId,
+          auth_user_id: authUser.id,
+          first_name: firstName,
+          last_name: lastName,
+          full_name: fullName,
+          company_name: 'Google User',
+          email: email,
+          phone: '',
+          site_address: '',
+        },
+      ], { onConflict: 'email', ignoreDuplicates: true })
+      .select()
+      .single()
+
+    if (error) {
+      // Conflict from concurrent insert — re-fetch the existing row
+      const { data: existingRow } = await supabase
+        .from('clients')
+        .select('*')
+        .eq('email', email)
+        .maybeSingle()
+      if (existingRow) {
+        return {
+          id: existingRow.id,
+          clientId: existingRow.client_id,
+          firstName: existingRow.first_name || firstName,
+          lastName: existingRow.last_name || lastName,
+          fullName: existingRow.full_name || fullName,
+          companyName: existingRow.company_name || 'Google User',
+          email: existingRow.email,
+          phone: existingRow.phone || '',
+          siteAddress: existingRow.site_address || '',
+        }
+      }
+      logger.warn('Error auto-creating OAuth client profile:', error.message)
+      return {
+        id: authUser.id,
+        clientId: generatedClientId,
+        firstName,
+        lastName,
+        fullName,
+        companyName: 'Google User',
+        email,
+        phone: '',
+        siteAddress: '',
+      }
+    }
+
+    return {
+      id: newClient.id,
+      clientId: newClient.client_id,
+      firstName: newClient.first_name || firstName,
+      lastName: newClient.last_name || lastName,
+      fullName: newClient.full_name || fullName,
+      companyName: newClient.company_name,
+      email: newClient.email,
+      phone: newClient.phone,
+      siteAddress: newClient.site_address,
+    }
+  } catch (err) {
+    logger.error('Exception in syncOAuthUser:', err)
+    return null
+  }
+}
+
+
+
+// Idempotency cache to prevent duplicate ticket submissions within 10 seconds
+const recentTicketSubmissions = new Map()
+
+function pruneRecentTicketSubmissions() {
+  if (recentTicketSubmissions.size <= 50) return
+  const now = Date.now()
+  for (const [k, v] of recentTicketSubmissions.entries()) {
+    if (now - v.timestamp > 10000) recentTicketSubmissions.delete(k)
+  }
+}
+
+/**
+ * Submits a new support ticket to Supabase with idempotency guard; falls back to local storage.
+ * @param {Object} ticketData - Ticket form fields (email, subject, description, category, priority, etc.)
+ * @returns {Promise<Object>} Created ticket object
+ */
+export async function createTicket(ticketData) {
+  const email = ticketData.email?.toLowerCase().trim()
+  const subject = ticketData.subject?.trim()
+  const cacheKey = `${email}:${subject}`
+  const now = Date.now()
+
+  // Idempotency check: block identical ticket created within 10 seconds
+  const cached = recentTicketSubmissions.get(cacheKey)
+  if (cached && now - cached.timestamp < 10000) {
+    logger.warn('Duplicate ticket submission blocked by idempotency guard:', cacheKey)
+    return cached.ticket
+  }
+
+  const ticketNumber = generateTicketId()
+
+  if (isSupabaseConfigured && supabase) {
+    // Get current auth session user ID if available
+    const { data: sessionData } = await supabase.auth.getSession()
+    const authUserId = sessionData?.session?.user?.id
+
+    const payload = {
+      ticket_number: ticketNumber,
+      client_name: sanitizeInput(ticketData.clientName, 200),
+      company_name: sanitizeInput(ticketData.companyName, 200),
+      email: ticketData.email?.toLowerCase().trim(),
+      phone: sanitizeInput(ticketData.phone, 20) || '',
+      category: sanitizeInput(ticketData.category, 100),
+      priority: ticketData.priority || 'Medium',
+      subject: sanitizeInput(ticketData.subject, 300),
+      description: sanitizeInput(ticketData.description, 5000),
+      attachment: typeof ticketData.attachment === 'string' ? ticketData.attachment.trim() : '',
+      status: 'New',
+    }
+
+    if (isUUID(authUserId)) {
+      payload.client_id = authUserId
+    } else if (isUUID(ticketData.clientId)) {
+      payload.client_id = ticketData.clientId
+    }
+
+    let { data, error } = await supabase.from('tickets').insert([payload]).select().single()
+
+    // If RLS blocks SELECT on returning row for anonymous users, perform insert-only
+    if (error && (error.code === '42501' || error.message?.includes('permission denied'))) {
+      logger.warn('SELECT policy blocked returning row, attempting insert-only payload...')
+      const { error: insertOnlyErr } = await supabase.from('tickets').insert([payload])
+      if (!insertOnlyErr) {
+        data = {
+          id: crypto.randomUUID(),
+          ticket_number: payload.ticket_number,
+          client_name: payload.client_name,
+          company_name: payload.company_name,
+          email: payload.email,
+          phone: payload.phone,
+          category: payload.category,
+          priority: payload.priority,
+          subject: payload.subject,
+          description: payload.description,
+          attachment: payload.attachment,
+          status: payload.status,
+          created_at: new Date().toISOString(),
+        }
+        error = null
+      } else {
+        error = insertOnlyErr
+      }
+    }
+
+    if (error) {
+      logger.error('Supabase createTicket error:', error)
+      throw new Error(error.message || 'Failed to submit ticket to database.')
+    }
+
+    if (data) {
+      const createdTicket = {
+        id: data.id,
+        ticketNumber: data.ticket_number,
+        clientName: data.client_name,
+        companyName: data.company_name,
+        email: data.email,
+        phone: data.phone,
+        category: data.category,
+        priority: data.priority,
+        subject: data.subject,
+        description: data.description,
+        attachment: data.attachment || ticketData.attachment || '',
+        status: data.status,
+        createdAt: data.created_at,
+      }
+      recentTicketSubmissions.set(cacheKey, { timestamp: now, ticket: createdTicket })
+      pruneRecentTicketSubmissions()
+
+      // Dispatch custom event for real-time reactive updates
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('netops_ticket_updated', { detail: createdTicket }))
+      }
+      return createdTicket
+    }
+  }
+
+  // Fallback local storage
+  const tickets = getLocalData(LOCAL_STORAGE_TICKETS, [])
+  const newTicket = {
+    id: crypto.randomUUID(),
+    ticketNumber,
+    clientName: ticketData.clientName,
+    companyName: ticketData.companyName,
+    email: ticketData.email,
+    phone: ticketData.phone || '',
+    category: ticketData.category,
+    priority: ticketData.priority || 'Medium',
+    subject: ticketData.subject,
+    description: ticketData.description,
+    attachment: ticketData.attachment || '',
+    status: 'New',
+    createdAt: new Date().toISOString(),
+  }
+  tickets.unshift(newTicket)
+  setLocalData(LOCAL_STORAGE_TICKETS, tickets)
+  recentTicketSubmissions.set(cacheKey, { timestamp: now, ticket: newTicket })
+  pruneRecentTicketSubmissions()
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('netops_ticket_updated', { detail: newTicket }))
+  }
+  return newTicket
+}
+
+/**
+ * Fetches all tickets from Supabase ordered by creation date, with local storage fallback.
+ * @param {Object} [options={}] - Pagination options
+ * @param {number} [options.limit=100] - Maximum number of tickets to return
+ * @param {number} [options.offset=0] - Number of tickets to skip
+ * @returns {Promise<Array>} Array of formatted ticket objects
+ */
+export async function fetchTickets({ limit = 100, offset = 0 } = {}) {
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('tickets')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1)
+
+      if (error) {
+        logger.warn('Supabase fetchTickets error:', error.message)
+      } else if (data) {
+        const staffNameMap = await getStaffNameMap(data.map((t) => t.assigned_to))
+        const formatted = data.map((t) => formatTicketRow(t, staffNameMap))
+        // Sync fresh database data with local storage so deleted DB records do not linger
+        setLocalData(LOCAL_STORAGE_TICKETS, formatted)
+        return formatted
+      }
+    } catch (err) {
+      logger.error('Supabase fetchTickets exception:', err)
+    }
+  }
+
+  return getLocalData(LOCAL_STORAGE_TICKETS, [])
+}
+
+/**
+ * Fetches tickets belonging to a specific client filtered by email.
+ * @param {string} clientEmail - Client email address to filter by
+ * @returns {Promise<Array>} Array of formatted ticket objects for the client
+ */
+export async function fetchClientTickets(clientEmail) {
+  if (!clientEmail) return []
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('tickets')
+        .select('*')
+        .eq('email', clientEmail.toLowerCase().trim())
+        .order('created_at', { ascending: false })
+
+      if (error) {
+        logger.warn('Supabase fetchClientTickets error:', error.message)
+      } else if (data) {
+        const staffNameMap = await getStaffNameMap(data.map((t) => t.assigned_to))
+        return data.map((t) => formatTicketRow(t, staffNameMap))
+      }
+    } catch (err) {
+      logger.error('Supabase fetchClientTickets exception:', err)
+    }
+  }
+
+  // Fallback: filter local storage
+  const allTickets = getLocalData(LOCAL_STORAGE_TICKETS, [])
+  return allTickets.filter(
+    (t) => t.email?.toLowerCase() === clientEmail?.toLowerCase().trim()
+  )
+}
+
+/**
+ * Updates the status of a ticket by ID or ticket number in Supabase and local storage.
+ * Validates/normalizes status first. When Supabase is configured it is the source of
+ * truth: local storage and broadcasts update only after a successful DB write.
+ *
+ * @param {string} ticketId - Ticket UUID or ticket number (e.g. "NET-001")
+ * @param {string} newStatus - New status value (e.g. "In Progress", "Resolved", "Closed")
+ * @returns {Promise<Array>} Updated local tickets array
+ * @throws {Error} When status is invalid or a configured Supabase update fails
+ */
+export async function updateTicketStatus(ticketId, newStatus) {
+  const status = normalizeTicketStatus(newStatus)
+  if (!status) {
+    const message = `Invalid ticket status: ${typeof newStatus === 'string' ? newStatus : String(newStatus)}`
+    logger.error(message)
+    throw new Error(message)
+  }
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const isNetNumber = typeof ticketId === 'string' && ticketId.startsWith('NET-')
+      const targetColumn = isNetNumber ? 'ticket_number' : 'id'
+      const updatedAt = new Date().toISOString()
+
+      const { error } = await supabase
+        .from('tickets')
+        .update({ status, updated_at: updatedAt })
+        .eq(targetColumn, ticketId)
+
+      if (error) {
+        logger.warn('Supabase status update fallback attempt:', error.message)
+        const { error: retryError } = await supabase
+          .from('tickets')
+          .update({ status, updated_at: updatedAt })
+          .eq(isNetNumber ? 'id' : 'ticket_number', ticketId)
+        if (retryError) {
+          throw new Error(`Failed to update ticket status: ${retryError.message}`)
+        }
+      }
+    } catch (err) {
+      logger.error('Supabase updateTicketStatus exception:', err)
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+  }
+
+  const tickets = getLocalData(LOCAL_STORAGE_TICKETS, [])
+  const updated = tickets.map((t) => {
+    const isMatch = String(t.id) === String(ticketId) || String(t.ticketNumber) === String(ticketId) || String(t.ticket_number) === String(ticketId)
+    if (isMatch) {
+      return { ...t, status, updatedAt: new Date().toISOString() }
+    }
+    return t
+  })
+  setLocalData(LOCAL_STORAGE_TICKETS, updated)
+
+  if (typeof window !== 'undefined') {
+    const payload = { type: 'TICKET_UPDATED', ticketId, status }
+    window.dispatchEvent(new CustomEvent('netops_ticket_updated', { detail: payload }))
+    try {
+      if ('BroadcastChannel' in window) {
+        const bc = new BroadcastChannel('netops_live_chat')
+        bc.postMessage(payload)
+        bc.close()
+      }
+    } catch {
+      // silent
+    }
+  }
+
+  return updated
+}
+
+/**
+ * Assigns a staff member to a ticket in Supabase and local storage.
+ * When Supabase is configured, `assigned_to` is always a profile UUID or null
+ * (never a display-name string). Local storage / events still use display names.
+ *
+ * @param {string} ticketId - Ticket UUID or ticket number
+ * @param {string|Object|null|undefined} staffName - Staff UUID, display name, profile object, or empty to unassign
+ * @returns {Promise<Array>} Updated local tickets array
+ * @throws {Error} When a configured Supabase update fails or staff name cannot be resolved
+ */
+export async function assignTicketStaff(ticketId, staffName) {
+  let assignedToId = getStaffAssignmentId(staffName)
+  let displayName = getStaffDisplayName(staffName)
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      assignedToId = await resolveAssignedToUuid(staffName)
+
+      if (assignedToId) {
+        if (!displayName || isUUID(displayName)) {
+          const nameMap = await getStaffNameMap([assignedToId])
+          displayName = nameMap.get(assignedToId) || displayName || ''
+        }
+      } else {
+        displayName = ''
+      }
+
+      const isNetNumber = typeof ticketId === 'string' && ticketId.startsWith('NET-')
+      const targetColumn = isNetNumber ? 'ticket_number' : 'id'
+      const updatePayload = {
+        assigned_to: assignedToId,
+        updated_at: new Date().toISOString(),
+      }
+
+      const { error } = await supabase
+        .from('tickets')
+        .update(updatePayload)
+        .eq(targetColumn, ticketId)
+
+      if (error) {
+        logger.warn('Supabase assignTicketStaff fallback attempt:', error.message)
+        const { error: retryError } = await supabase
+          .from('tickets')
+          .update(updatePayload)
+          .eq(isNetNumber ? 'id' : 'ticket_number', ticketId)
+        if (retryError) {
+          throw new Error(`Failed to assign ticket staff: ${retryError.message}`)
+        }
+      }
+    } catch (err) {
+      logger.error('Supabase assignTicketStaff exception:', err)
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+  } else if (!staffName || (typeof staffName === 'string' && !staffName.trim())) {
+    assignedToId = null
+    displayName = ''
+  }
+
+  const tickets = getLocalData(LOCAL_STORAGE_TICKETS, [])
+  const updated = tickets.map((t) => {
+    const isMatch = String(t.id) === String(ticketId) || String(t.ticketNumber) === String(ticketId) || String(t.ticket_number) === String(ticketId)
+    if (isMatch) {
+      return {
+        ...t,
+        assignedTo: displayName,
+        assigned_to: displayName,
+        assignedStaff: displayName,
+        assignedToId: assignedToId || null,
+        updatedAt: new Date().toISOString(),
+      }
+    }
+    return t
+  })
+  setLocalData(LOCAL_STORAGE_TICKETS, updated)
+
+  if (typeof window !== 'undefined') {
+    const payload = {
+      type: 'TICKET_UPDATED',
+      ticketId,
+      assignedTo: displayName,
+      assigned_to: displayName,
+      assignedStaff: displayName,
+      assignedToId: assignedToId || null,
+    }
+    window.dispatchEvent(new CustomEvent('netops_ticket_updated', { detail: payload }))
+    try {
+      if ('BroadcastChannel' in window) {
+        const bc = new BroadcastChannel('netops_live_chat')
+        bc.postMessage(payload)
+        bc.close()
+      }
+    } catch {
+      // silent
+    }
+  }
+
+  return updated
+}
+
+/**
+ * Marks a ticket as Closed and adds a client approval reply.
+ * @param {string} ticketId - Ticket UUID or ticket number
+ * @param {string} [clientName='You'] - Display name of the approving client
+ * @returns {Promise<void>}
+ */
+export async function approveAndCloseTicket(ticketId, clientName = 'You') {
+  await updateTicketStatus(ticketId, 'Closed')
+  await addTicketReply(ticketId, clientName, 'client', '✅ You approved resolution and closed this ticket.')
+}
+
+/**
+ * Sets a ticket back to "In Progress" and adds a reopen reply with optional reason.
+ * @param {string} ticketId - Ticket UUID or ticket number
+ * @param {string} [clientName='You'] - Display name of the client reopening the ticket
+ * @param {string} [reason=''] - Optional reason for reopening
+ * @returns {Promise<void>}
+ */
+export async function reopenTicket(ticketId, clientName = 'You', reason = '') {
+  await updateTicketStatus(ticketId, 'In Progress')
+  const msg = `↺ You reopened this ticket: ${reason || 'Further troubleshooting required.'}`
+  await addTicketReply(ticketId, clientName, 'client', msg)
+}
+
+/**
+ * Computes the 48-hour auto-close countdown for a resolved ticket.
+ * @param {Object} ticket - Ticket object with status and updatedAt/createdAt fields
+ * @returns {{ hoursLeft: number, minutesLeft: number, isExpired: boolean, formattedCountdown: string }}
+ */
+export function getAutoCloseTimeRemaining(ticket) {
+  if (!ticket || ticket.status !== 'Resolved') {
+    return { hoursLeft: 0, minutesLeft: 0, isExpired: false, formattedCountdown: '' }
+  }
+
+  const resolvedTime = new Date(ticket.updatedAt || ticket.createdAt || Date.now()).getTime()
+  const autoCloseDeadline = resolvedTime + 48 * 60 * 60 * 1000 // 48 hours in ms
+  const msRemaining = autoCloseDeadline - Date.now()
+
+  if (msRemaining <= 0) {
+    return { hoursLeft: 0, minutesLeft: 0, isExpired: true, formattedCountdown: '0h 0m (Auto-closing)' }
+  }
+
+  const hoursLeft = Math.floor(msRemaining / (1000 * 60 * 60))
+  const minutesLeft = Math.floor((msRemaining % (1000 * 60 * 60)) / (1000 * 60))
+
+  return {
+    hoursLeft,
+    minutesLeft,
+    isExpired: false,
+    formattedCountdown: `${hoursLeft}h ${minutesLeft}m`,
+  }
+}
+
+/**
+ * Deletes a ticket by UUID from Supabase and removes it from local storage.
+ * @param {string} ticketId - Ticket UUID to delete
+ * @returns {Promise<Array>} Updated local tickets array after deletion
+ */
+export async function deleteTicket(ticketId) {
+  if (!ticketId) return []
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { error } = await supabase
+        .from('tickets')
+        .delete()
+        .eq('id', ticketId)
+
+      if (error) {
+        logger.warn('Supabase deleteTicket error:', error.message)
+      }
+    } catch (err) {
+      logger.error('Supabase deleteTicket exception:', err)
+    }
+  }
+
+  const tickets = getLocalData(LOCAL_STORAGE_TICKETS, [])
+  const updated = tickets.filter((t) => t.id !== ticketId)
+  setLocalData(LOCAL_STORAGE_TICKETS, updated)
+  return updated
+}
+
+/**
+ * Removes all NetOps local storage cache keys for tickets, accounts, and replies.
+ * @returns {void}
+ */
+export function clearLocalCache() {
+  try {
+    localStorage.removeItem(LOCAL_STORAGE_TICKETS)
+    localStorage.removeItem(LOCAL_STORAGE_ACCOUNTS)
+    localStorage.removeItem(LOCAL_STORAGE_REPLIES)
+    logger.info('Local storage cache cleared successfully.')
+  } catch (e) {
+    logger.error('Error clearing local cache:', e)
+  }
+}
+
+
+/**
+ * Inserts a reply message for a ticket in Supabase and dispatches a live event.
+ * @param {string} ticketId - Ticket UUID the reply belongs to
+ * @param {string} senderName - Display name of the message sender
+ * @param {string} senderRole - Role of the sender ('client', 'staff', 'admin')
+ * @param {string} message - Reply message text
+ * @param {string|null} [attachmentUrl=null] - Optional attachment URL to include
+ * @returns {Promise<Object>} Created reply object
+ */
+export async function addTicketReply(ticketId, senderName, senderRole, message, attachmentUrl = null) {
+  const sanitizedMessage = sanitizeInput(message || '', 5000)
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const insertData = {
+        ticket_id: ticketId,
+        sender_name: senderName,
+        sender_role: senderRole,
+        message: sanitizedMessage,
+      }
+      if (attachmentUrl) {
+        insertData.attachment_url = attachmentUrl
+      }
+
+      let { data, error } = await supabase
+        .from('ticket_replies')
+        .insert([insertData])
+        .select()
+        .single()
+
+      // Fallback if attachment_url column does not exist in Supabase table schema
+      if (error && attachmentUrl && error.message?.includes('attachment_url')) {
+        logger.warn('attachment_url column missing in ticket_replies, embedding image in message payload')
+        const safeUrl = /^https?:\/\//i.test(attachmentUrl) ? attachmentUrl.replace(/[()]/g, '') : ''
+        const fallbackMsg = safeUrl
+          ? (sanitizedMessage ? `${sanitizedMessage}\n\n![Attachment](${safeUrl})` : `![Attachment](${safeUrl})`)
+          : sanitizedMessage
+
+        const retryRes = await supabase
+          .from('ticket_replies')
+          .insert([
+            {
+              ticket_id: ticketId,
+              sender_name: senderName,
+              sender_role: senderRole,
+              message: fallbackMsg,
+            },
+          ])
+          .select()
+          .single()
+
+        data = retryRes.data
+        error = retryRes.error
+      }
+
+      if (error) {
+        logger.error('Supabase addTicketReply error:', error)
+        throw new Error(error.message || 'Failed to send reply.')
+      }
+
+      if (data) {
+        const createdReply = {
+          id: data.id,
+          ticketId: data.ticket_id,
+          senderName: data.sender_name,
+          senderRole: data.sender_role,
+          message: data.message,
+          attachmentUrl: data.attachment_url || attachmentUrl,
+          createdAt: data.created_at,
+        }
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('netops_reply_added', { detail: createdReply }))
+        }
+        return createdReply
+      }
+    } catch (err) {
+      logger.error('Supabase reply exception:', err)
+      throw err
+    }
+  }
+
+  const replies = getLocalData(LOCAL_STORAGE_REPLIES, [])
+  const newReply = {
+    id: crypto.randomUUID(),
+    ticketId,
+    senderName,
+    senderRole,
+    message: sanitizedMessage,
+    attachmentUrl,
+    createdAt: new Date().toISOString(),
+  }
+  replies.push(newReply)
+  setLocalData(LOCAL_STORAGE_REPLIES, replies)
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('netops_reply_added', { detail: newReply }))
+  }
+
+  return newReply
+}
+
+/**
+ * Fetches all chat replies for a specific ticket ordered by creation time.
+ * @param {string} ticketId - Ticket UUID to fetch replies for
+ * @returns {Promise<Array>} Array of formatted reply objects
+ */
+export async function fetchTicketReplies(ticketId) {
+  if (!ticketId) return []
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('ticket_replies')
+        .select('*')
+        .eq('ticket_id', ticketId)
+        .order('created_at', { ascending: true })
+
+      if (!error && data) {
+        return data.map((r) => ({
+          id: r.id,
+          ticketId: r.ticket_id,
+          senderName: r.sender_name,
+          senderRole: r.sender_role,
+          message: r.message,
+          attachmentUrl: r.attachment_url || null,
+          createdAt: r.created_at,
+        }))
+      }
+    } catch (err) {
+      logger.error('Supabase fetchTicketReplies error:', err)
+    }
+  }
+
+  const allReplies = getLocalData(LOCAL_STORAGE_REPLIES, [])
+  return allReplies.filter((r) => r.ticketId === ticketId)
+}
+
+/**
+ * Subscribes to real-time reply inserts for a ticket via Supabase Realtime or custom events.
+ * @param {string} ticketId - Ticket UUID to listen for replies on
+ * @param {Function} callback - Invoked with each new reply object
+ * @returns {Function} Unsubscribe function
+ */
+export function subscribeToTicketReplies(ticketId, callback) {
+  if (!ticketId) return () => {}
+
+  if (isSupabaseConfigured && supabase) {
+    const channelName = `ticket_chat_${ticketId}_${crypto.randomUUID()}`
+    const channel = supabase
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'ticket_replies',
+          filter: `ticket_id=eq.${ticketId}`,
+        },
+        (payload) => {
+          if (payload.new) {
+            callback({
+              id: payload.new.id,
+              ticketId: payload.new.ticket_id,
+              senderName: payload.new.sender_name,
+              senderRole: payload.new.sender_role,
+              message: payload.new.message,
+              createdAt: payload.new.created_at,
+            })
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }
+
+  // Fallback custom event listener for local offline mode
+  const handleLocalReply = (e) => {
+    if (e.detail && e.detail.ticketId === ticketId) {
+      callback(e.detail)
+    }
+  }
+  window.addEventListener('netops_reply_added', handleLocalReply)
+  return () => window.removeEventListener('netops_reply_added', handleLocalReply)
+}
+
+/**
+ * Subscribes to all ticket changes (create, update, delete) across the system via Supabase Realtime.
+ * @param {Function} callback - Invoked with each Supabase Realtime payload or custom event
+ * @returns {Function} Unsubscribe function
+ */
+export function subscribeToAllTickets(callback) {
+  if (isSupabaseConfigured && supabase) {
+    const channelName = `all_tickets_${crypto.randomUUID()}`
+    const channel = supabase
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tickets',
+        },
+        (payload) => {
+          if (callback) callback(payload)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }
+
+  // Fallback custom event for local offline mode
+  const handleLocalTicket = () => {
+    if (callback) callback()
+  }
+  window.addEventListener('netops_ticket_updated', handleLocalTicket)
+  return () => window.removeEventListener('netops_ticket_updated', handleLocalTicket)
+}
+
+/**
+ * Updates a staff or admin profile row in the Supabase `profiles` table.
+ * @param {string} userId - Auth user UUID of the staff member
+ * @param {Object} updateData - Profile fields to update (firstName, lastName, companyName, phone)
+ * @returns {Promise<Object>} Updated staff profile object
+ */
+export async function updateStaffProfile(userId, updateData) {
+  if (!userId) throw new Error('User ID is required.')
+
+  const firstName = sanitizeInput(updateData.firstName || '', 100)
+  const lastName = sanitizeInput(updateData.lastName || '', 100)
+  const fullName = (updateData.fullName || `${firstName} ${lastName}`).trim()
+  const companyName = sanitizeInput(updateData.companyName || '', 200)
+  const phone = sanitizeInput(updateData.phone || '', 20)
+
+  if (isSupabaseConfigured && supabase) {
+    const { data, error } = await supabase
+      .from('profiles')
+      .update({
+        first_name: firstName,
+        last_name: lastName,
+        full_name: fullName,
+        company_name: companyName,
+        phone,
+      })
+      .eq('id', userId)
+      .select()
+      .single()
+
+    if (error) {
+      logger.error('Supabase updateStaffProfile error:', error)
+      throw new Error(error.message)
+    }
+
+    return {
+      id: data.id,
+      firstName: data.first_name || firstName,
+      lastName: data.last_name || lastName,
+      fullName: data.full_name || fullName,
+      companyName: data.company_name || companyName,
+      email: data.email,
+      phone: data.phone || phone,
+      role: data.role,
+    }
+  }
+
+  return {
+    id: userId,
+    firstName,
+    lastName,
+    fullName,
+    companyName,
+    phone,
+  }
+}
+
+/**
+ * Subscribes globally to all incoming ticket replies and dispatches toast notifications for counterparty messages.
+ * @param {string} [currentUserRole='client'] - Role of the current user ('client', 'staff', 'admin')
+ * @returns {Function} Unsubscribe function that cleans up all listeners and channels
+ */
+export function subscribeToGlobalReplies(currentUserRole = 'client') {
+  const isClient = currentUserRole === 'client'
+
+  const handleIncomingReply = (reply) => {
+    if (!reply || !reply.message) return
+    const senderRole = reply.senderRole || reply.sender_role
+    // Only notify if message was sent by counterparty
+    if ((isClient && senderRole !== 'client') || (!isClient && senderRole === 'client')) {
+      dispatchNotification({
+        title: isClient
+          ? `New message from ${reply.senderName || 'Support Engineer'}`
+          : `New message from ${reply.senderName || 'Client'}`,
+        message: reply.message,
+        type: 'chat',
+        ticketId: reply.ticketId || reply.ticket_id,
+      })
+    }
+  }
+
+  // 1. Listen to BroadcastChannel across browser tabs/windows
+  let broadcastChannel = null
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      broadcastChannel = new BroadcastChannel('netops_live_chat')
+      broadcastChannel.onmessage = (event) => {
+        if (event.data?.type === 'NEW_REPLY' && event.data?.message) {
+          handleIncomingReply(event.data.message)
+        }
+      }
+    }
+  } catch (err) {
+    // silent
+  }
+
+  // 2. Listen to Supabase Realtime postgres changes on `ticket_replies` table
+  // Server-side filter matches counterparty logic; handleIncomingReply remains a safety net.
+  let supabaseChannel = null
+  if (isSupabaseConfigured && supabase) {
+    const channelName = `global_chat_replies_${crypto.randomUUID()}`
+    const replyFilter = isClient
+      ? 'sender_role=neq.client'
+      : 'sender_role=eq.client'
+    supabaseChannel = supabase
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'ticket_replies',
+          filter: replyFilter,
+        },
+        (payload) => {
+          if (payload.new) {
+            handleIncomingReply({
+              id: payload.new.id,
+              ticketId: payload.new.ticket_id,
+              senderName: payload.new.sender_name,
+              senderRole: payload.new.sender_role,
+              message: payload.new.message,
+              createdAt: payload.new.created_at,
+            })
+          }
+        }
+      )
+      .subscribe()
+  }
+
+  // 3. Listen to local event bus for in-window updates
+  const handleLocalReply = (e) => {
+    if (e.detail) handleIncomingReply(e.detail)
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('netops_reply_added', handleLocalReply)
+  }
+
+  return () => {
+    if (broadcastChannel) broadcastChannel.close()
+    if (supabaseChannel && supabase) supabase.removeChannel(supabaseChannel)
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('netops_reply_added', handleLocalReply)
+    }
+  }
+}
+

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: http: https: ws: wss:; connect-src * 'unsafe-inline' ws: wss:; img-src * data: blob:; style-src 'self' 'unsafe-inline' https:;" />
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <meta http-equiv="X-Frame-Options" content="DENY" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta
+      name="description"
+      content="Internal Operations & Command Center for NetOps Engineers, Administrators, and Executives."
+    />
+    <script>
+      (function() {
+        try {
+          var saved = localStorage.getItem('ops-theme');
+          var isDark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (isDark) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <title>NetOps Staff & CEO Command Center</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/ops.jsx"></script>
+  </body>
+</html>
