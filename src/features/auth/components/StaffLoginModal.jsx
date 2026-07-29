@@ -214,7 +214,7 @@ export function StaffLoginModal({ isOpen, onClose, onLoginSuccess }) {
               </div>
             )}
 
-            <div className="flex items-center justify-end gap-3 pt-2">
+            <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 sm:gap-3 pt-2">
               {isForgotPassword ? (
                 <button
                   type="button"
@@ -223,15 +223,15 @@ export function StaffLoginModal({ isOpen, onClose, onLoginSuccess }) {
                     setResetEmailSent(false)
                     setError('')
                   }}
-                  className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-zinc-400 hover:text-white"
+                  className="w-full sm:w-auto flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-medium text-zinc-400 hover:text-white whitespace-nowrap shrink-0 transition-colors"
                 >
-                  <ArrowLeft size={14} /> Back to Sign In
+                  <ArrowLeft size={14} className="shrink-0" /> Back to Sign In
                 </button>
               ) : (
                 <button
                   type="button"
                   onClick={handleModalClose}
-                  className="px-4 py-2 text-xs font-medium text-zinc-400 hover:text-white"
+                  className="w-full sm:w-auto flex items-center justify-center px-4 py-2 text-xs font-medium text-zinc-400 hover:text-white whitespace-nowrap shrink-0 transition-colors"
                 >
                   Cancel
                 </button>
@@ -241,14 +241,14 @@ export function StaffLoginModal({ isOpen, onClose, onLoginSuccess }) {
                 <button
                   type="submit"
                   disabled={loading}
-                  className="flex items-center gap-2 rounded-xl bg-purple-600 px-5 py-2.5 text-xs font-bold text-white hover:bg-purple-500 shadow-lg disabled:opacity-50"
+                  className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-xl bg-purple-600 px-5 py-2.5 text-xs font-bold text-white hover:bg-purple-500 shadow-lg disabled:opacity-50 whitespace-nowrap shrink-0 transition-all cursor-pointer"
                 >
                   {loading
                     ? 'Processing...'
                     : isForgotPassword
                     ? 'Send Reset Link'
                     : 'Sign In'}{' '}
-                  {isForgotPassword ? <Mail size={16} /> : <LogIn size={16} />}
+                  {isForgotPassword ? <Mail size={16} className="shrink-0" /> : <LogIn size={16} className="shrink-0" />}
                 </button>
               )}
             </div>

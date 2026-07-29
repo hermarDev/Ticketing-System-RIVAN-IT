@@ -212,12 +212,12 @@ export function ClientAccountSettings({ clientAccount, onAccountUpdated, onBack 
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center justify-end gap-3 pt-3">
+        <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 sm:gap-3 pt-3">
           {onBack && (
             <button
               type="button"
               onClick={onBack}
-              className="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all"
+              className="w-full sm:w-auto flex items-center justify-center px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all whitespace-nowrap shrink-0"
             >
               Back
             </button>
@@ -225,9 +225,9 @@ export function ClientAccountSettings({ clientAccount, onAccountUpdated, onBack 
           <button
             type="submit"
             disabled={loading}
-            className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-900 font-extrabold text-xs shadow-md disabled:opacity-50 transition-all cursor-pointer"
+            className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-900 font-extrabold text-xs shadow-md disabled:opacity-50 transition-all cursor-pointer whitespace-nowrap shrink-0"
           >
-            {loading ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+            {loading ? <Loader2 size={16} className="animate-spin shrink-0" /> : <Save size={16} className="shrink-0" />}
             {loading ? 'Saving...' : 'Save Profile Changes'}
           </button>
         </div>

@@ -270,7 +270,7 @@ export function ClientLoginModal({ isOpen, onClose, onLoginSuccess, onSwitchToRe
             )}
 
             {/* Actions */}
-            <div className="flex items-center justify-end gap-3 pt-3">
+            <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 sm:gap-3 pt-3">
               {isForgotPassword ? (
                 <button
                   type="button"
@@ -279,15 +279,15 @@ export function ClientLoginModal({ isOpen, onClose, onLoginSuccess, onSwitchToRe
                     setResetEmailSent(false)
                     setError('')
                   }}
-                  className="flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all"
+                  className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all whitespace-nowrap shrink-0"
                 >
-                  <ArrowLeft size={14} /> Back to Sign In
+                  <ArrowLeft size={14} className="shrink-0" /> Back to Sign In
                 </button>
               ) : (
                 <button
                   type="button"
                   onClick={handleModalClose}
-                  className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all"
+                  className="w-full sm:w-auto flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-4 py-3 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all whitespace-nowrap shrink-0"
                 >
                   Cancel
                 </button>
@@ -297,19 +297,19 @@ export function ClientLoginModal({ isOpen, onClose, onLoginSuccess, onSwitchToRe
                 <button
                   type="submit"
                   disabled={loading}
-                  className="flex items-center justify-center gap-2 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white active:scale-[0.99] px-6 py-3 text-xs font-black uppercase tracking-wider text-white dark:text-slate-900 shadow-md disabled:opacity-50 transition-all cursor-pointer"
+                  className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white active:scale-[0.99] px-5 sm:px-6 py-3 text-xs font-black uppercase tracking-wider text-white dark:text-slate-900 shadow-md disabled:opacity-50 transition-all cursor-pointer whitespace-nowrap shrink-0"
                 >
                   {loading ? (
                     <>
-                      <Loader2 size={16} className="animate-spin" /> {isForgotPassword ? 'Sending…' : 'Signing In…'}
+                      <Loader2 size={16} className="animate-spin shrink-0" /> {isForgotPassword ? 'Sending…' : 'Signing In…'}
                     </>
                   ) : isForgotPassword ? (
                     <>
-                      Send Reset Link <Mail size={16} />
+                      Send Reset Link <Mail size={16} className="shrink-0" />
                     </>
                   ) : (
                     <>
-                      Log In <LogIn size={16} />
+                      Log In <LogIn size={16} className="shrink-0" />
                     </>
                   )}
                 </button>
