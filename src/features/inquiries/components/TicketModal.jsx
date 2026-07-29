@@ -1,10 +1,15 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ClipboardCheck, MailCheck, Paperclip, X, Loader2, AlertCircle } from 'lucide-react'
 import { priorities, requestTypes } from '../../../config/serviceOptions'
 import { Field } from '../../../shared/components/Field'
+import { AddressAutocomplete } from '../../../shared/components/AddressAutocomplete'
 import { validateRequiredFields, isValidEmail } from '../../../lib/formValidation'
 import { createTicket } from '../../../lib/ticketService'
+import {
+  formatStoredSiteAddress,
+  splitStoredSiteAddress,
+} from '../../../lib/locationService'
 import { supabase, isSupabaseConfigured } from '../../../lib/supabaseClient'
 import { logger } from '../../../lib/logger'
 
@@ -19,6 +24,7 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
     priority: priorities[1],
     productModel: '',
     siteLocation: '',
+    unitLandmark: '',
     description: '',
     attachment: '',
     attachmentName: '',
@@ -34,17 +40,29 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
     [],
   )
 
+  // Apply account site/contact defaults only once per open cycle — not on every
+  // account object reference change while the modal stays open (would overwrite
+  // free-text siteLocation mid-typing).
+  const didHydrateForOpenRef = useRef(false)
+
   useEffect(() => {
-    if (isOpen) {
-      setTicketId('')
-      setIsSubmitting(false)
-      setIsUploading(false)
-      setAttachmentsList([])
+    if (!isOpen) {
+      didHydrateForOpenRef.current = false
+      return
     }
-    if (!account) return
+    setTicketId('')
+    setIsSubmitting(false)
+    setIsUploading(false)
+    setAttachmentsList([])
+  }, [isOpen])
+
+  useEffect(() => {
+    if (!isOpen || !account || didHydrateForOpenRef.current) return
+    didHydrateForOpenRef.current = true
 
     const clientFirstName = account.firstName || (account.fullName ? account.fullName.split(' ')[0] : '')
     const clientLastName = account.lastName || (account.fullName ? account.fullName.split(' ').slice(1).join(' ') : '')
+    const siteParts = splitStoredSiteAddress(account.siteAddress || '')
 
     setForm((current) => ({
       ...current,
@@ -52,7 +70,8 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
       lastName: clientLastName || current.lastName,
       email: account.email || current.email,
       company: account.company || account.companyName || current.company,
-      siteLocation: account.siteAddress || current.siteLocation,
+      siteLocation: siteParts.address || current.siteLocation,
+      unitLandmark: siteParts.unitLandmark || current.unitLandmark,
     }))
   }, [account, isOpen])
 
@@ -155,6 +174,14 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
           : form.attachment || ''
 
       const clientFullName = `${form.firstName.trim()} ${form.lastName.trim()}`.trim()
+      const siteStored = formatStoredSiteAddress({
+        addressString: form.siteLocation,
+        unitLandmark: form.unitLandmark,
+      })
+      const productTag = form.productModel.trim()
+        ? `[Product: ${form.productModel.trim()}] `
+        : ''
+      const siteTag = siteStored ? `[Site: ${siteStored}]` : ''
 
       const created = await createTicket({
         clientId: account?.id || account?.clientId || '',
@@ -168,7 +195,7 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
         category: form.department,
         priority: form.priority,
         subject: form.subject,
-        description: `[Product: ${form.productModel}] [Site: ${form.siteLocation}]\n\n${form.description}`,
+        description: `${productTag}${siteTag}\n\n${form.description}`.trim(),
         attachment: attachmentPayload,
       })
       setTicketId(created.ticketNumber || created.id)
@@ -279,13 +306,21 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
                   required
                 />
               </Field>
-              <Field label="Site / Branch Location" error={errors.siteLocation}>
-                <input
+              <div className="form-field wide">
+                <label htmlFor="ticket-site-location" id="ticket-site-location-label">
+                  Site / Branch Location
+                </label>
+                <AddressAutocomplete
+                  id="ticket-site-location"
                   value={form.siteLocation}
-                  onChange={(event) => updateField('siteLocation', event.target.value)}
+                  onChange={(next) => updateField('siteLocation', next)}
+                  unitLandmark={form.unitLandmark}
+                  onUnitLandmarkChange={(next) => updateField('unitLandmark', next)}
+                  error={errors.siteLocation}
                   required
+                  placeholder="Search or type site / branch address…"
                 />
-              </Field>
+              </div>
               <Field label="Description" error={errors.description} wide>
                 <textarea
                   value={form.description}

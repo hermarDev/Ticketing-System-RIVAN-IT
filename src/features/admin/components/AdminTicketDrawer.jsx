@@ -17,10 +17,12 @@ import {
   Check,
   Copy,
   ChevronDown,
+  MapPin,
 } from 'lucide-react'
 import { TicketChatThread } from '../../../shared/components/TicketChatThread'
 import { openAttachment, isImageUrl, getAttachmentLabel, parseAttachments } from '../../../lib/attachmentUtils'
 import { updateTicketStatus, assignTicketStaff, setActiveTicketId } from '../../../lib/ticketService'
+import { parseSiteFromTicketDescription, buildGoogleMapsUrl } from '../../../lib/locationService'
 
 export function AdminTicketDrawer({
   ticket,
@@ -78,6 +80,15 @@ export function AdminTicketDrawer({
   if (!isOpen || !ticket) return null
 
   const fileAttachments = parseAttachments(ticket?.attachment)
+  const parsedDescription = parseSiteFromTicketDescription(ticket?.description || '')
+  const siteLocation = parsedDescription.site
+  const hasDescriptionTags = Boolean(parsedDescription.site || parsedDescription.product)
+  const descriptionBody = hasDescriptionTags
+    ? (parsedDescription.body || 'No additional description provided.')
+    : (ticket?.description || 'No detailed description provided.')
+  const siteMapsUrl = siteLocation
+    ? buildGoogleMapsUrl({ address: siteLocation })
+    : null
 
   const handleCopyTicketId = () => {
     navigator.clipboard.writeText(ticket.ticketNumber || ticket.id)
@@ -519,9 +530,29 @@ export function AdminTicketDrawer({
                     Inquiry Description
                   </span>
                   <p className="text-sm font-medium leading-relaxed text-slate-950 dark:text-slate-100 whitespace-pre-wrap">
-                    {ticket.description || 'No detailed description provided.'}
+                    {descriptionBody}
                   </p>
                 </div>
+
+                {siteLocation && (
+                  <div className="p-5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-3">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-700 dark:text-slate-400 flex items-center gap-1.5">
+                      <MapPin size={14} aria-hidden="true" /> Site Location
+                    </span>
+                    <p className="text-sm font-bold leading-relaxed text-slate-950 dark:text-white">
+                      {siteLocation}
+                    </p>
+                    <a
+                      href={siteMapsUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-[11px] font-bold text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    >
+                      <ExternalLink size={12} aria-hidden="true" />
+                      Open in Google Maps
+                    </a>
+                  </div>
+                )}
 
                 {/* Client & Metadata Properties Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

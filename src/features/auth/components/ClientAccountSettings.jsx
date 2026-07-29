@@ -1,8 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
-import { User, Building2, Mail, Phone, MapPin, Loader2, CheckCircle2, ShieldAlert, KeyRound, Save } from 'lucide-react'
+import { User, Building2, Mail, Phone, Loader2, CheckCircle2, ShieldAlert, KeyRound, Save } from 'lucide-react'
 import { updateClientAccount } from '../../../lib/ticketService'
 import { isValidPhPhone } from '../../../lib/formValidation'
+import {
+  formatStoredSiteAddress,
+  splitStoredSiteAddress,
+} from '../../../lib/locationService'
+import { AddressAutocomplete } from '../../../shared/components/AddressAutocomplete'
 
 export function ClientAccountSettings({ clientAccount, onAccountUpdated, onBack }) {
   const [form, setForm] = useState({
@@ -12,22 +17,33 @@ export function ClientAccountSettings({ clientAccount, onAccountUpdated, onBack 
     email: '',
     phone: '',
     siteAddress: '',
+    unitLandmark: '',
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
 
+  // Hydrate only when account identity changes — not on every clientAccount
+  // object reference (e.g. App onAuthStateChange / session refresh churn),
+  // which would wipe mid-typing siteAddress and other fields.
+  const hydratedIdentityRef = useRef('')
+
   useEffect(() => {
-    if (clientAccount) {
-      setForm({
-        firstName: clientAccount.firstName || (clientAccount.fullName ? clientAccount.fullName.split(' ')[0] : ''),
-        lastName: clientAccount.lastName || (clientAccount.fullName ? clientAccount.fullName.split(' ').slice(1).join(' ') : ''),
-        companyName: clientAccount.companyName || clientAccount.company || '',
-        email: clientAccount.email || '',
-        phone: clientAccount.phone || '',
-        siteAddress: clientAccount.siteAddress || '',
-      })
-    }
+    if (!clientAccount) return
+    const identity = `${clientAccount.email || ''}|${clientAccount.id || clientAccount.clientId || ''}`
+    if (hydratedIdentityRef.current === identity) return
+    hydratedIdentityRef.current = identity
+
+    const siteParts = splitStoredSiteAddress(clientAccount.siteAddress || '')
+    setForm({
+      firstName: clientAccount.firstName || (clientAccount.fullName ? clientAccount.fullName.split(' ')[0] : ''),
+      lastName: clientAccount.lastName || (clientAccount.fullName ? clientAccount.fullName.split(' ').slice(1).join(' ') : ''),
+      companyName: clientAccount.companyName || clientAccount.company || '',
+      email: clientAccount.email || '',
+      phone: clientAccount.phone || '',
+      siteAddress: siteParts.address,
+      unitLandmark: siteParts.unitLandmark,
+    })
   }, [clientAccount])
 
   const handleSubmit = async (e) => {
@@ -42,13 +58,18 @@ export function ClientAccountSettings({ clientAccount, onAccountUpdated, onBack 
 
     setLoading(true)
     try {
+      const composedSite = formatStoredSiteAddress({
+        addressString: form.siteAddress,
+        unitLandmark: form.unitLandmark,
+      })
+
       const updated = await updateClientAccount(clientAccount.email, {
         firstName: form.firstName,
         lastName: form.lastName,
         fullName: `${form.firstName.trim()} ${form.lastName.trim()}`,
         companyName: form.companyName,
         phone: form.phone,
-        siteAddress: form.siteAddress,
+        siteAddress: composedSite,
       })
 
       setSuccessMsg('Your account profile has been updated successfully!')
@@ -198,17 +219,20 @@ export function ClientAccountSettings({ clientAccount, onAccountUpdated, onBack 
 
         {/* Site / Installation Address */}
         <div>
-          <label className="block text-xs font-bold uppercase text-slate-700 dark:text-slate-300 mb-1.5">Site / Installation Address</label>
-          <div className="relative">
-            <MapPin size={16} className="absolute left-3.5 top-3.5 text-slate-400 pointer-events-none" />
-            <textarea
-              rows={2}
-              value={form.siteAddress}
-              onChange={(e) => setForm({ ...form, siteAddress: e.target.value })}
-              placeholder="Facility address, building floor, street, city, province"
-              className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 pl-10 pr-3 py-2.5 text-xs font-medium text-slate-950 dark:text-white focus:outline-none focus:border-slate-900 dark:focus:border-slate-100 transition-all resize-none shadow-xs"
-            />
-          </div>
+          <label
+            htmlFor="client-site-address"
+            className="block text-xs font-bold uppercase text-slate-700 dark:text-slate-300 mb-1.5"
+          >
+            Site / Installation Address
+          </label>
+          <AddressAutocomplete
+            id="client-site-address"
+            value={form.siteAddress}
+            onChange={(next) => setForm((current) => ({ ...current, siteAddress: next }))}
+            unitLandmark={form.unitLandmark}
+            onUnitLandmarkChange={(next) => setForm((current) => ({ ...current, unitLandmark: next }))}
+            placeholder="Facility address, building, street, city, province"
+          />
         </div>
 
         {/* Action Buttons */}

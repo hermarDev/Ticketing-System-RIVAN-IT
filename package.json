@@ -15,6 +15,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "framer-motion": "^12.42.2",
     "isomorphic-dompurify": "^3.19.0",
+    "leaflet": "^1.9.4",
     "lucide-react": "^1.26.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

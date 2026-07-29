@@ -1,8 +1,10 @@
-import DOMPurify from 'isomorphic-dompurify'
 import { isSupabaseConfigured, signOutLocal, supabase } from './supabaseClient'
 import { generateClientId, generateTicketId } from './idGenerators'
 import { logger } from './logger'
 import { dispatchNotification } from './notificationService'
+import { sanitizeInput } from './formValidation'
+
+export { sanitizeInput }
 
 export {
   setActiveTicketId,
@@ -13,21 +15,6 @@ export {
   clearNotificationLogs,
   getUnreadNotificationCount,
 } from './notificationService'
-
-/**
- * Plain-text sanitization using DOMPurify: strips all HTML tags and attributes,
- * trims whitespace, and enforces maxLength. Output is plain text for storage /
- * React-escaped display only. Nullish and non-string values become `''`.
- *
- * @param {*} str - Raw user input
- * @param {number} [maxLength=5000] - Maximum length of the returned string
- * @returns {string}
- */
-export function sanitizeInput(str, maxLength = 5000) {
-  if (typeof str !== 'string') return ''
-  const clean = DOMPurify.sanitize(str, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] })
-  return clean.trim().slice(0, maxLength)
-}
 
 // Local storage keys for fallback offline mode
 const LOCAL_STORAGE_TICKETS = 'netops_tickets_v1'

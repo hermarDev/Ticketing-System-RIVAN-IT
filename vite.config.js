@@ -15,4 +15,20 @@ export default defineConfig({
       },
     },
   },
+  server: {
+    proxy: {
+      // Nominatim usage policy wants an identifying User-Agent; browsers cannot set it.
+      // Dev: proxy adds UA. Production: configure the same /api/nominatim reverse proxy
+      // (or set VITE_NOMINATIM_BASE). Public Nominatim also allows CORS (*) as fallback.
+      '/api/nominatim': {
+        target: 'https://nominatim.openstreetmap.org',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/nominatim/, ''),
+        headers: {
+          'User-Agent':
+            'NetOpsTicketingSystem/1.0 (https://github.com/netops; location-autocomplete)',
+        },
+      },
+    },
+  },
 })
