@@ -1,7 +1,12 @@
 import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Lock, ShieldAlert, Loader2, Eye, EyeOff, X, CheckCircle2 } from 'lucide-react'
+import { Lock, ShieldAlert, Loader2, Eye, EyeOff, X, CheckCircle2, Check, AlertCircle } from 'lucide-react'
+import {
+  getPasswordValidationError,
+  mapAuthPasswordError,
+} from '../../../lib/formValidation'
 import { completePasswordRecovery } from '../../../lib/ticketService'
+import { PasswordRequirementsChecklist } from '../../../shared/components/PasswordRequirementsChecklist'
 
 function clearUrlTokens() {
   try {
@@ -22,12 +27,19 @@ export function PasswordRecoveryModal({ isOpen, onClose, contextLabel = 'your ac
   const [loading, setLoading] = useState(false)
   const [success, setSuccess] = useState(false)
 
+  const passwordsMatch = Boolean(
+    newPassword && confirmPassword && newPassword === confirmPassword
+  )
+  const passwordsMismatch = Boolean(
+    newPassword && confirmPassword && newPassword !== confirmPassword
+  )
+
   if (!isOpen) return null
 
   const validate = () => {
     const nextErrors = []
-    if (!String(newPassword || '').trim()) nextErrors.push('Please enter a new password.')
-    if (String(newPassword).length < 8) nextErrors.push('Password must be at least 8 characters.')
+    const passwordError = getPasswordValidationError(newPassword)
+    if (passwordError) nextErrors.push(passwordError)
     if (String(newPassword) !== String(confirmPassword)) nextErrors.push('Passwords do not match.')
     return nextErrors
   }
@@ -51,7 +63,11 @@ export function PasswordRecoveryModal({ isOpen, onClose, contextLabel = 'your ac
         onClose?.()
       }, 1200)
     } catch (err) {
-      setError(err?.message || 'Failed to update password. Please request a new reset link and try again.')
+      setError(
+        mapAuthPasswordError(err?.message) ||
+          err?.message ||
+          'Failed to update password. Please request a new reset link and try again.'
+      )
     } finally {
       setLoading(false)
     }
@@ -142,9 +158,10 @@ export function PasswordRecoveryModal({ isOpen, onClose, contextLabel = 'your ac
                         setNewPassword(e.target.value)
                         setError('')
                       }}
-                      placeholder="Minimum 8 characters"
+                      placeholder="Upper, lower, number, symbol"
                       autoComplete="new-password"
                       required
+                      aria-describedby="recovery-password-requirements"
                       className="w-full bg-transparent pl-10 pr-10 py-3 text-sm text-slate-950 dark:text-white font-medium placeholder-slate-400 focus:outline-none"
                       disabled={loading}
                     />
@@ -161,11 +178,38 @@ export function PasswordRecoveryModal({ isOpen, onClose, contextLabel = 'your ac
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
-                    Confirm New Password
-                  </label>
-                  <div className="relative rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 focus-within:border-slate-900 dark:focus-within:border-slate-100 transition-all">
-                    <Lock size={17} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
+                      Confirm New Password
+                    </label>
+                    {passwordsMatch && (
+                      <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-600 dark:text-emerald-400" aria-live="polite">
+                        <Check size={12} /> Passwords Match
+                      </span>
+                    )}
+                    {passwordsMismatch && (
+                      <span className="flex items-center gap-1 text-[10px] font-bold text-rose-600 dark:text-rose-400" aria-live="polite">
+                        <AlertCircle size={12} /> Passwords do not match
+                      </span>
+                    )}
+                  </div>
+                  <div className={`relative rounded-xl border bg-slate-50 dark:bg-slate-950 transition-all ${
+                    passwordsMatch
+                      ? 'border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20'
+                      : passwordsMismatch
+                        ? 'border-rose-500 focus-within:ring-2 focus-within:ring-rose-500/20'
+                        : 'border-slate-200 dark:border-slate-700 focus-within:border-slate-900 dark:focus-within:border-slate-100'
+                  }`}>
+                    <Lock
+                      size={17}
+                      className={`absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none ${
+                        passwordsMatch
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : passwordsMismatch
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-slate-400'
+                      }`}
+                    />
                     <input
                       type={showConfirmPassword ? 'text' : 'password'}
                       value={confirmPassword}
@@ -176,6 +220,7 @@ export function PasswordRecoveryModal({ isOpen, onClose, contextLabel = 'your ac
                       placeholder="Re-enter your new password"
                       autoComplete="new-password"
                       required
+                      aria-invalid={passwordsMismatch}
                       className="w-full bg-transparent pl-10 pr-10 py-3 text-sm text-slate-950 dark:text-white font-medium placeholder-slate-400 focus:outline-none"
                       disabled={loading}
                     />
@@ -190,6 +235,11 @@ export function PasswordRecoveryModal({ isOpen, onClose, contextLabel = 'your ac
                     </button>
                   </div>
                 </div>
+
+                <PasswordRequirementsChecklist
+                  password={newPassword}
+                  listId="recovery-password-requirements"
+                />
               </>
             )}
 

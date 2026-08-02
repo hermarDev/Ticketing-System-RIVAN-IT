@@ -10,3 +10,6 @@ export const requestTypes = [
 ]
 
 export const priorities = ['Low', 'Medium', 'High', 'Urgent']
+
+/** Client-reported work impact (storage enums — do not invent synonyms). */
+export const urgencies = ['Low', 'Normal', 'High', 'Critical']

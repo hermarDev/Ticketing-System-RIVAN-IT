@@ -22,7 +22,9 @@ export const NOMINATIM_USER_AGENT =
 const ADDRESS_MAX = 500
 const UNIT_MAX = 120
 const SITE_SEP = ' — '
-const SEARCH_LIMIT = 5
+const SEARCH_LIMIT = 8
+/** Philippines bounding box (west,south,east,north) for Nominatim viewbox bias */
+const PH_VIEWBOX = '116.0,4.0,127.0,21.0'
 
 function getViteEnv() {
   return (typeof import.meta !== 'undefined' && import.meta.env) || {}
@@ -139,7 +141,7 @@ async function nominatimFetch(pathWithQuery, { signal } = {}) {
   const headers = {
     Accept: 'application/json',
     // Browsers forbid setting User-Agent; harmless on direct calls, useful behind proxies.
-    'Accept-Language': 'en',
+    'Accept-Language': 'en, fil',
   }
 
   const response = await fetch(url, { headers, ...(signal ? { signal } : {}) })
@@ -187,9 +189,9 @@ export async function searchAddressNominatim(query, options = {}) {
   if (!trimmed) return []
 
   const q = encodeURIComponent(sanitizeInput(trimmed, ADDRESS_MAX))
-  // PH-default bias: countrycodes=ph keeps results local for site/install addresses.
+  // PH-default bias: countrycodes + viewbox keeps results local for site/install addresses.
   const data = await nominatimFetch(
-    `/search?q=${q}&format=json&addressdetails=1&limit=${SEARCH_LIMIT}&countrycodes=ph`,
+    `/search?q=${q}&format=json&addressdetails=1&limit=${SEARCH_LIMIT}&countrycodes=ph&viewbox=${PH_VIEWBOX}&bounded=1`,
     { signal: options?.signal },
   )
 
@@ -201,14 +203,15 @@ export async function searchAddressNominatim(query, options = {}) {
  * Address search entry point. When VITE_GOOGLE_MAPS_API_KEY is set, a future Google
  * Places path can run here; today it still falls back to Nominatim (key never required).
  * @param {string} query
+ * @param {{ signal?: AbortSignal }} [options]
  */
-export async function searchAddress(query) {
+export async function searchAddress(query, options = {}) {
   const key = getViteEnv().VITE_GOOGLE_MAPS_API_KEY
   if (key) {
     // Stub: Google Places Autocomplete (New) would go here using the key.
     // Keep Nominatim until Places is wired so the key remains optional.
   }
-  return searchAddressNominatim(query)
+  return searchAddressNominatim(query, options)
 }
 
 function readGeolocationPosition(options) {

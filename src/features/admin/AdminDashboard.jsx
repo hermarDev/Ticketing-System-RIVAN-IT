@@ -30,15 +30,21 @@ import {
   Mail,
   Maximize2,
   Bell,
+  Lock,
 } from 'lucide-react'
-import { fetchTickets, updateTicketStatus, assignTicketStaff, isUUID, subscribeToAllTickets, subscribeToGlobalReplies, updateStaffProfile, setActiveTicketId, getUnreadNotificationCount } from '../../lib/ticketService'
+import { fetchTickets, updateTicketStatus, updateTicketPriority, assignTicketStaff, isUUID, subscribeToAllTickets, subscribeToGlobalReplies, updateStaffProfile, createStaffAccount, changeAuthenticatedUserPassword, requestPasswordResetForEmail, setActiveTicketId, getUnreadNotificationCount, resolveClientUrgencyDisplay } from '../../lib/ticketService'
+import { priorities } from '../../config/serviceOptions'
 import { supabase, isSupabaseConfigured } from '../../lib/supabaseClient'
+import { validateRequiredFields, isValidEmail, getPasswordValidationError, mapAuthPasswordError } from '../../lib/formValidation'
+import { PasswordRequirementsChecklist } from '../../shared/components/PasswordRequirementsChecklist'
 import { logger } from '../../lib/logger'
 import { TicketChatThread } from '../../shared/components/TicketChatThread'
 import { FloatingThemeToggle } from '../../shared/components/FloatingThemeToggle'
+import { UrgencyBadge } from '../../shared/components/UrgencyBadge'
 import { AdminTicketDrawer } from './components/AdminTicketDrawer'
 import { NotificationToastContainer } from '../../shared/components/NotificationToastContainer'
 import { NotificationActivityDrawer } from '../../shared/components/NotificationActivityDrawer'
+import { openAttachment, isImageUrl, getAttachmentLabel, parseAttachments } from '../../lib/attachmentUtils'
 
 // ─── Stat Card ────────────────────────────────────────────────────────────────
 function StatCard({ label, value, icon: Icon, sub }) {
@@ -95,57 +101,72 @@ function StatusBadge({ status }) {
 
 // ─── Create Staff Modal ───────────────────────────────────────────────────────
 function CreateStaffModal({ onClose, onSuccess }) {
-  const [form, setForm] = useState({ full_name: '', email: '', password: '', role: 'staff' })
+  const [form, setForm] = useState({
+    firstName: '',
+    lastName: '',
+    email: '',
+    password: '',
+    confirmPassword: '',
+    role: 'staff',
+  })
+  const [fieldErrors, setFieldErrors] = useState({})
   const [showPw, setShowPw] = useState(false)
+  const [showConfirmPw, setShowConfirmPw] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+
+  const passwordsMatch = Boolean(
+    form.password && form.confirmPassword && form.password === form.confirmPassword
+  )
+  const passwordsMismatch = Boolean(
+    form.password && form.confirmPassword && form.password !== form.confirmPassword
+  )
+
+  const validate = () => {
+    const requiredFields = ['firstName', 'lastName', 'email', 'password', 'confirmPassword']
+    const nextErrors = validateRequiredFields(form, requiredFields)
+    if (form.email && !isValidEmail(form.email)) {
+      nextErrors.email = 'Enter a valid email address.'
+    }
+    if (form.password) {
+      const passwordError = getPasswordValidationError(form.password)
+      if (passwordError) nextErrors.password = passwordError
+    }
+    if (form.password && form.confirmPassword && form.password !== form.confirmPassword) {
+      nextErrors.confirmPassword = 'Passwords do not match. Please verify.'
+    }
+    setFieldErrors(nextErrors)
+    return Object.keys(nextErrors).length === 0
+  }
 
   const handleCreate = async (e) => {
     e.preventDefault()
     setError('')
+    if (!validate()) return
+
     setLoading(true)
-
-    if (!isSupabaseConfigured || !supabase) {
-      setError('Supabase is not configured. Please set up your .env credentials.')
-      setLoading(false)
-      return
-    }
-
-    if (form.password.length < 8) {
-      setError('Password must be at least 8 characters.')
-      setLoading(false)
-      return
-    }
+    const fullName = `${form.firstName.trim()} ${form.lastName.trim()}`.trim()
 
     try {
-      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+      const created = await createStaffAccount({
+        firstName: form.firstName,
+        lastName: form.lastName,
+        fullName,
         email: form.email,
         password: form.password,
-        options: {
-          data: {
-            full_name: form.full_name,
-            role: form.role,
-          },
-        },
-      })
-
-      if (signUpError) throw signUpError
-
-      const { error: profileError } = await supabase.from('profiles').upsert({
-        id: signUpData.user.id,
-        full_name: form.full_name,
-        email: form.email,
         role: form.role,
-        phone: '',
       })
 
-      if (profileError) throw profileError
-
-      onSuccess(`Staff account created for ${form.full_name} (${form.role})`)
+      onSuccess(`Staff account created for ${created.fullName} (${created.role})`)
       onClose()
     } catch (err) {
       logger.error('Staff creation error:', err)
-      setError(err.message || 'Failed to create staff account.')
+      const friendlyPasswordError = mapAuthPasswordError(err.message)
+      if (friendlyPasswordError) {
+        setFieldErrors((current) => ({ ...current, password: friendlyPasswordError }))
+      } else {
+        setError(err.message || 'Failed to create staff account.')
+      }
     } finally {
       setLoading(false)
     }
@@ -181,16 +202,37 @@ function CreateStaffModal({ onClose, onSuccess }) {
             </div>
           )}
 
-          <div>
-            <label className="block text-xs font-bold uppercase text-[var(--muted)] mb-1.5">Full Name</label>
-            <input
-              type="text"
-              required
-              value={form.full_name}
-              onChange={(e) => setForm({ ...form, full_name: e.target.value })}
-              placeholder="e.g. Juan Dela Cruz"
-              className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] p-3 text-sm text-[var(--ink)] placeholder-[var(--muted)] focus:outline-none focus:border-[var(--accent)] transition-all"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-bold uppercase text-[var(--muted)] mb-1.5">First Name</label>
+              <input
+                type="text"
+                required
+                autoComplete="given-name"
+                value={form.firstName}
+                onChange={(e) => setForm({ ...form, firstName: e.target.value })}
+                placeholder="Juan"
+                className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] p-3 text-sm text-[var(--ink)] placeholder-[var(--muted)] focus:outline-none focus:border-[var(--accent)] transition-all"
+              />
+              {fieldErrors.firstName && (
+                <p className="mt-1 text-[11px] font-semibold text-rose-600 dark:text-rose-400">{fieldErrors.firstName}</p>
+              )}
+            </div>
+            <div>
+              <label className="block text-xs font-bold uppercase text-[var(--muted)] mb-1.5">Last Name</label>
+              <input
+                type="text"
+                required
+                autoComplete="family-name"
+                value={form.lastName}
+                onChange={(e) => setForm({ ...form, lastName: e.target.value })}
+                placeholder="Dela Cruz"
+                className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] p-3 text-sm text-[var(--ink)] placeholder-[var(--muted)] focus:outline-none focus:border-[var(--accent)] transition-all"
+              />
+              {fieldErrors.lastName && (
+                <p className="mt-1 text-[11px] font-semibold text-rose-600 dark:text-rose-400">{fieldErrors.lastName}</p>
+              )}
+            </div>
           </div>
 
           <div>
@@ -203,6 +245,9 @@ function CreateStaffModal({ onClose, onSuccess }) {
               placeholder="staff@netops.com"
               className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] p-3 text-sm text-[var(--ink)] placeholder-[var(--muted)] focus:outline-none focus:border-[var(--accent)] transition-all"
             />
+            {fieldErrors.email && (
+              <p className="mt-1 text-[11px] font-semibold text-rose-600 dark:text-rose-400">{fieldErrors.email}</p>
+            )}
           </div>
 
           <div>
@@ -211,19 +256,71 @@ function CreateStaffModal({ onClose, onSuccess }) {
               <input
                 type={showPw ? 'text' : 'password'}
                 required
+                autoComplete="new-password"
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
-                placeholder="Min. 8 characters"
+                placeholder="Upper, lower, number, symbol"
                 className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] p-3 pr-10 text-sm text-[var(--ink)] placeholder-[var(--muted)] focus:outline-none focus:border-[var(--accent)] transition-all"
+                aria-describedby="staff-password-requirements"
               />
               <button
                 type="button"
                 onClick={() => setShowPw(!showPw)}
+                aria-label={showPw ? 'Hide password' : 'Show password'}
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted)] hover:text-[var(--ink)]"
               >
                 {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
             </div>
+            {fieldErrors.password && (
+              <p className="mt-1 text-[11px] font-semibold text-rose-600 dark:text-rose-400">{fieldErrors.password}</p>
+            )}
+          </div>
+
+            <PasswordRequirementsChecklist
+              password={form.password}
+              listId="staff-password-requirements"
+            />
+
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-bold uppercase text-[var(--muted)]">Confirm Password</label>
+              {passwordsMatch && (
+                <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">Passwords match</span>
+              )}
+              {passwordsMismatch && (
+                <span className="text-[10px] font-bold text-rose-600 dark:text-rose-400">Passwords do not match</span>
+              )}
+            </div>
+            <div className="relative">
+              <input
+                type={showConfirmPw ? 'text' : 'password'}
+                required
+                autoComplete="new-password"
+                value={form.confirmPassword}
+                onChange={(e) => setForm({ ...form, confirmPassword: e.target.value })}
+                placeholder="Re-enter password"
+                aria-invalid={passwordsMismatch}
+                className={`w-full rounded-xl border bg-[var(--bg)] p-3 pr-10 text-sm text-[var(--ink)] placeholder-[var(--muted)] focus:outline-none transition-all ${
+                  passwordsMatch
+                    ? 'border-emerald-500 focus:border-emerald-500'
+                    : passwordsMismatch
+                      ? 'border-rose-500 focus:border-rose-500'
+                      : 'border-[var(--line)] focus:border-[var(--accent)]'
+                }`}
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPw(!showConfirmPw)}
+                aria-label={showConfirmPw ? 'Hide confirm password' : 'Show confirm password'}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted)] hover:text-[var(--ink)]"
+              >
+                {showConfirmPw ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+            {fieldErrors.confirmPassword && !passwordsMismatch && (
+              <p className="mt-1 text-[11px] font-semibold text-rose-600 dark:text-rose-400">{fieldErrors.confirmPassword}</p>
+            )}
           </div>
 
           <div>
@@ -435,6 +532,61 @@ function TicketsTab({
     }
   }
 
+  const handlePriorityChange = async (ticketId, newPriority) => {
+    const overrideTimestamp = new Date().toISOString()
+    const previousPriority =
+      (selectedTicket?.id === ticketId ? selectedTicket?.priority : null) ||
+      (adminDrawerTicket?.id === ticketId ? adminDrawerTicket?.priority : null) ||
+      'Medium'
+    const staffIdentity = currentUser?.email || currentUser?.fullName || 'Staff'
+
+    if (selectedTicket?.id === ticketId) {
+      setSelectedTicket((prev) => (
+        prev
+          ? {
+              ...prev,
+              priority: newPriority,
+              priorityUpdatedAt: overrideTimestamp,
+              priority_updated_at: overrideTimestamp,
+            }
+          : null
+      ))
+    }
+    if (adminDrawerTicket?.id === ticketId) {
+      setAdminDrawerTicket((prev) => (
+        prev
+          ? {
+              ...prev,
+              priority: newPriority,
+              priorityUpdatedAt: overrideTimestamp,
+              priority_updated_at: overrideTimestamp,
+            }
+          : null
+      ))
+    }
+
+    try {
+      await updateTicketPriority(ticketId, newPriority, staffIdentity)
+      const data = await fetchTickets()
+      setTickets(data)
+      const updated = data.find((t) => t.id === ticketId)
+      if (selectedTicket?.id === ticketId) {
+        setSelectedTicket((prev) => updated || (prev ? { ...prev, priority: newPriority } : null))
+      }
+      if (adminDrawerTicket?.id === ticketId) {
+        setAdminDrawerTicket((prev) => updated || (prev ? { ...prev, priority: newPriority } : null))
+      }
+    } catch (err) {
+      logger.error('Failed to update priority:', err)
+      if (selectedTicket?.id === ticketId) {
+        setSelectedTicket((prev) => (prev ? { ...prev, priority: previousPriority } : null))
+      }
+      if (adminDrawerTicket?.id === ticketId) {
+        setAdminDrawerTicket((prev) => (prev ? { ...prev, priority: previousPriority } : null))
+      }
+    }
+  }
+
   const handleAssignStaff = async (ticketId, staff) => {
     try {
       await assignTicketStaff(ticketId, staff || null)
@@ -614,9 +766,13 @@ function TicketsTab({
                       <ArrowLeft size={16} />
                     </button>
                     <div>
-                      <div className="flex items-center gap-2 mb-1">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
                         <span className="font-mono text-xs font-black text-slate-100 bg-slate-900 dark:bg-slate-800 dark:text-slate-100 px-2 py-0.5 rounded border border-slate-900 dark:border-slate-700">{selectedTicket?.ticketNumber || selectedTicket?.id}</span>
                         <PriorityBadge priority={selectedTicket?.priority} />
+                        <UrgencyBadge
+                          urgency={resolveClientUrgencyDisplay(selectedTicket)}
+                          className="font-black"
+                        />
                       </div>
                       <h3 className="text-base font-black text-[var(--ink)] leading-snug">{selectedTicket?.subject}</h3>
                       <p className="text-xs text-[var(--muted)] mt-0.5 font-medium">
@@ -625,7 +781,7 @@ function TicketsTab({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <button
                       onClick={() => setAdminDrawerTicket(selectedTicket)}
                       className="p-2 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-[var(--muted)] hover:text-[var(--ink)] hover:border-[var(--line-strong)] transition-all shadow-sm flex items-center gap-1.5 text-xs font-bold cursor-pointer"
@@ -635,8 +791,9 @@ function TicketsTab({
                       <span className="hidden xl:inline">Focus Drawer</span>
                     </button>
                     <div>
-                      <label className="block text-[10px] uppercase text-[var(--muted)] font-extrabold mb-1">Update Status</label>
+                      <label htmlFor="detail-status-select" className="block text-[10px] uppercase text-[var(--muted)] font-extrabold mb-1">Update Status</label>
                       <select
+                        id="detail-status-select"
                         value={selectedTicket?.status || 'New'}
                         onChange={(e) => selectedTicket?.id && handleStatusChange(selectedTicket.id, e.target.value)}
                         className="bg-[var(--paper)] border border-[var(--line)] text-[var(--ink)] rounded-xl px-3 py-1 text-xs font-extrabold focus:outline-none focus:border-[var(--accent)] transition-all shadow-sm cursor-pointer"
@@ -650,8 +807,23 @@ function TicketsTab({
                     </div>
 
                     <div>
-                      <label className="block text-[10px] uppercase text-[var(--muted)] font-extrabold mb-1">Assigned Staff</label>
+                      <label htmlFor="detail-priority-select" className="block text-[10px] uppercase text-[var(--muted)] font-extrabold mb-1">Priority</label>
                       <select
+                        id="detail-priority-select"
+                        value={selectedTicket?.priority || 'Medium'}
+                        onChange={(e) => selectedTicket?.id && handlePriorityChange(selectedTicket.id, e.target.value)}
+                        className="bg-[var(--paper)] border border-[var(--line)] text-[var(--ink)] rounded-xl px-3 py-1 text-xs font-extrabold focus:outline-none focus:border-[var(--accent)] transition-all shadow-sm cursor-pointer"
+                      >
+                        {priorities.map((prio) => (
+                          <option key={prio} value={prio}>{prio}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label htmlFor="detail-staff-select" className="block text-[10px] uppercase text-[var(--muted)] font-extrabold mb-1">Assigned Staff</label>
+                      <select
+                        id="detail-staff-select"
                         value={selectedTicket?.assignedToId || ''}
                         onChange={(e) => {
                           if (!selectedTicket?.id) return
@@ -793,7 +965,7 @@ function TicketsTab({
                 </div>
 
                 {/* 2-Way Live Chat Thread */}
-                <div className="flex-1 p-3 overflow-hidden min-h-[300px]">
+                <div className="flex-1 p-3 overflow-hidden flex flex-col min-h-0">
                   {selectedTicket?.id && (
                     <TicketChatThread
                       ticketId={selectedTicket.id}
@@ -935,6 +1107,83 @@ function SettingsTab({ currentUser, onUpdateCurrentUser }) {
   const [saving, setSaving] = useState(false)
   const [successMsg, setSuccessMsg] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
+
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmNewPassword, setConfirmNewPassword] = useState('')
+  const [showCurrentPw, setShowCurrentPw] = useState(false)
+  const [showNewPw, setShowNewPw] = useState(false)
+  const [showConfirmNewPw, setShowConfirmNewPw] = useState(false)
+  const [pwdSaving, setPwdSaving] = useState(false)
+  const [pwdSuccessMsg, setPwdSuccessMsg] = useState('')
+  const [pwdErrorMsg, setPwdErrorMsg] = useState('')
+  const [resetEmailSending, setResetEmailSending] = useState(false)
+  const [resetEmailSent, setResetEmailSent] = useState(false)
+
+  const newPasswordsMatch = Boolean(
+    newPassword && confirmNewPassword && newPassword === confirmNewPassword
+  )
+  const newPasswordsMismatch = Boolean(
+    newPassword && confirmNewPassword && newPassword !== confirmNewPassword
+  )
+
+  const handlePasswordChange = async (e) => {
+    e.preventDefault()
+    setPwdSuccessMsg('')
+    setPwdErrorMsg('')
+
+    if (!currentPassword.trim()) {
+      setPwdErrorMsg('Please enter your current password.')
+      return
+    }
+    const passwordPolicyError = getPasswordValidationError(newPassword)
+    if (passwordPolicyError) {
+      setPwdErrorMsg(passwordPolicyError)
+      return
+    }
+    if (newPassword !== confirmNewPassword) {
+      setPwdErrorMsg('Passwords do not match. Please verify.')
+      return
+    }
+
+    setPwdSaving(true)
+    try {
+      await changeAuthenticatedUserPassword({
+        email: currentUser?.email,
+        currentPassword,
+        newPassword,
+      })
+      setCurrentPassword('')
+      setNewPassword('')
+      setConfirmNewPassword('')
+      setPwdSuccessMsg('Password updated successfully.')
+      setTimeout(() => setPwdSuccessMsg(''), 4000)
+    } catch (err) {
+      logger.error('Error changing staff password:', err)
+      setPwdErrorMsg(
+        mapAuthPasswordError(err.message) ||
+          err.message ||
+          'Failed to update password. Please try again.'
+      )
+    } finally {
+      setPwdSaving(false)
+    }
+  }
+
+  const handleForgotPasswordEmail = async () => {
+    if (!currentUser?.email || !isSupabaseConfigured) return
+    setResetEmailSending(true)
+    setPwdErrorMsg('')
+    setResetEmailSent(false)
+    try {
+      await requestPasswordResetForEmail(currentUser.email, typeof window !== 'undefined' ? window.location.href : undefined)
+      setResetEmailSent(true)
+    } catch (err) {
+      setPwdErrorMsg(err.message || 'Failed to send password reset email.')
+    } finally {
+      setResetEmailSending(false)
+    }
+  }
 
   const handleProfileSave = async (e) => {
     e.preventDefault()
@@ -1098,6 +1347,172 @@ function SettingsTab({ currentUser, onUpdateCurrentUser }) {
             </button>
           </div>
         </form>
+      </div>
+
+      {/* Security / Change Password */}
+      <div className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-6 shadow-sm space-y-5">
+        <div className="flex items-center gap-3 border-b border-[var(--line)] pb-4">
+          <span className="size-10 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-900 dark:text-slate-100">
+            <Lock size={20} />
+          </span>
+          <div>
+            <h3 className="font-extrabold text-[var(--ink)] text-base">Security</h3>
+            <p className="text-xs text-[var(--muted)] font-medium">Update your portal password while signed in</p>
+          </div>
+        </div>
+
+        {!isSupabaseConfigured ? (
+          <p className="text-sm text-[var(--muted)] font-medium">
+            Password changes require Supabase Auth. Connect Supabase to enable this feature.
+          </p>
+        ) : (
+          <>
+            {pwdSuccessMsg && (
+              <motion.div
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3.5 text-xs font-bold text-emerald-600 dark:text-emerald-400"
+              >
+                <CheckCircle2 size={16} className="shrink-0 text-emerald-500" />
+                <span>{pwdSuccessMsg}</span>
+              </motion.div>
+            )}
+
+            {pwdErrorMsg && (
+              <motion.div
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3.5 text-xs font-bold text-rose-600 dark:text-rose-400"
+              >
+                <AlertTriangle size={16} className="shrink-0 text-rose-500" />
+                <span>{pwdErrorMsg}</span>
+              </motion.div>
+            )}
+
+            {resetEmailSent && (
+              <motion.div
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex items-center gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 p-3.5 text-xs font-bold text-sky-700 dark:text-sky-300"
+              >
+                <Mail size={16} className="shrink-0" />
+                <span>
+                  Check <strong className="font-extrabold">{currentUser?.email}</strong> for a password reset link.
+                </span>
+              </motion.div>
+            )}
+
+            <form onSubmit={handlePasswordChange} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase text-[var(--muted)] mb-1.5">Current Password</label>
+                <div className="relative">
+                  <input
+                    type={showCurrentPw ? 'text' : 'password'}
+                    autoComplete="current-password"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    placeholder="Enter current password"
+                    className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] p-3 pr-10 text-sm text-[var(--ink)] font-medium placeholder-[var(--muted)] focus:outline-none focus:border-[var(--accent)] transition-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrentPw(!showCurrentPw)}
+                    aria-label={showCurrentPw ? 'Hide current password' : 'Show current password'}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted)] hover:text-[var(--ink)]"
+                  >
+                    {showCurrentPw ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold uppercase text-[var(--muted)] mb-1.5">New Password</label>
+                  <div className="relative">
+                    <input
+                      type={showNewPw ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      placeholder="Upper, lower, number, symbol"
+                      aria-describedby="staff-settings-password-requirements"
+                      className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] p-3 pr-10 text-sm text-[var(--ink)] font-medium placeholder-[var(--muted)] focus:outline-none focus:border-[var(--accent)] transition-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPw(!showNewPw)}
+                      aria-label={showNewPw ? 'Hide new password' : 'Show new password'}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted)] hover:text-[var(--ink)]"
+                    >
+                      {showNewPw ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-bold uppercase text-[var(--muted)]">Confirm New Password</label>
+                    {newPasswordsMatch && (
+                      <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">Passwords match</span>
+                    )}
+                    {newPasswordsMismatch && (
+                      <span className="text-[10px] font-bold text-rose-600 dark:text-rose-400">Passwords do not match</span>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <input
+                      type={showConfirmNewPw ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      value={confirmNewPassword}
+                      onChange={(e) => setConfirmNewPassword(e.target.value)}
+                      placeholder="Re-enter new password"
+                      aria-invalid={newPasswordsMismatch}
+                      className={`w-full rounded-xl border bg-[var(--bg)] p-3 pr-10 text-sm text-[var(--ink)] font-medium placeholder-[var(--muted)] focus:outline-none transition-all ${
+                        newPasswordsMatch
+                          ? 'border-emerald-500 focus:border-emerald-500'
+                          : newPasswordsMismatch
+                            ? 'border-rose-500 focus:border-rose-500'
+                            : 'border-[var(--line)] focus:border-[var(--accent)]'
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmNewPw(!showConfirmNewPw)}
+                      aria-label={showConfirmNewPw ? 'Hide confirm password' : 'Show confirm password'}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted)] hover:text-[var(--ink)]"
+                    >
+                      {showConfirmNewPw ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <PasswordRequirementsChecklist
+                password={newPassword}
+                listId="staff-settings-password-requirements"
+              />
+
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={resetEmailSending || pwdSaving}
+                  onClick={handleForgotPasswordEmail}
+                  className="text-xs font-bold text-[var(--accent)] hover:underline disabled:opacity-50 text-left"
+                >
+                  {resetEmailSending ? 'Sending reset email…' : 'Forgot current password? Send reset email'}
+                </button>
+                <button
+                  type="submit"
+                  disabled={pwdSaving}
+                  className="flex items-center justify-center gap-2 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white active:scale-95 px-6 py-3 text-xs font-extrabold text-slate-100 dark:text-slate-900 shadow-md disabled:opacity-50 transition-all sm:ml-auto"
+                >
+                  {pwdSaving ? <Loader2 size={16} className="animate-spin" /> : <Lock size={16} />}
+                  <span>{pwdSaving ? 'Updating Password…' : 'Update Password'}</span>
+                </button>
+              </div>
+            </form>
+          </>
+        )}
       </div>
 
       {/* SLA & System Config Card */}

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { User, X, Ticket, RefreshCw, LogOut, ArrowLeft, MessageSquare, ChevronRight, Settings } from 'lucide-react'
-import { fetchClientTickets, logoutClient } from '../../../lib/ticketService'
+import { fetchClientTickets, logoutClient, resolveClientUrgencyDisplay } from '../../../lib/ticketService'
 import { TicketChatThread } from '../../../shared/components/TicketChatThread'
 import { ClientAccountSettings } from './ClientAccountSettings'
 
@@ -147,13 +147,13 @@ export function ClientPortalModal({
                   <p className="text-xs text-[var(--muted)] font-medium leading-relaxed">{selectedTicket.description}</p>
                   <div className="flex flex-wrap gap-4 text-[11px] font-bold text-[var(--muted)] pt-2 border-t border-[var(--line)]">
                     <span>Category: <strong className="text-[var(--ink)]">{selectedTicket.category}</strong></span>
-                    <span>Priority: <strong className="text-[var(--ink)]">{selectedTicket.priority}</strong></span>
+                    <span>Reported Urgency: <strong className="text-[var(--ink)]">{resolveClientUrgencyDisplay(selectedTicket)}</strong></span>
                     <span>Created: <strong className="text-[var(--ink)]">{new Date(selectedTicket.createdAt).toLocaleDateString()}</strong></span>
                   </div>
                 </div>
 
                 {/* Chat Thread */}
-                <div className="flex-1 min-h-[350px]">
+                <div className="flex-1 flex flex-col min-h-0 h-full">
                   <TicketChatThread
                     ticketId={selectedTicket.id}
                     senderName={clientAccount?.fullName || 'Client'}

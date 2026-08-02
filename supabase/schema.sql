@@ -96,6 +96,62 @@ CREATE TRIGGER on_auth_user_created
   FOR EACH ROW
   EXECUTE FUNCTION public.handle_new_user();
 
+-- Admin-only helper: creates/updates a staff/admin/CEO profile row for an
+-- existing auth user. SECURITY DEFINER (bypasses RLS), validates the CALLER is
+-- admin/ceo and that the role is in the allowlist. Used by createStaffAccount;
+-- the client-side upsert is impossible under the profiles INSERT/UPDATE policies.
+-- Also shipped as supabase/20260802_admin_create_staff_profile.sql.
+CREATE OR REPLACE FUNCTION public.admin_create_staff_profile(
+  p_user_id UUID,
+  p_first_name TEXT DEFAULT NULL,
+  p_last_name TEXT DEFAULT NULL,
+  p_full_name TEXT DEFAULT NULL,
+  p_email TEXT DEFAULT NULL,
+  p_role TEXT DEFAULT 'staff'
+)
+RETURNS public.profiles
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_profile public.profiles%ROWTYPE;
+BEGIN
+  -- Caller must be an admin or CEO. SECURITY DEFINER reads profiles directly
+  -- (bypassing RLS); auth.uid() is the caller's id.
+  IF NOT EXISTS (
+    SELECT 1 FROM public.profiles
+    WHERE id = auth.uid()
+      AND role IN ('admin', 'ceo')
+  ) THEN
+    RAISE EXCEPTION 'Only admins or the CEO can create staff accounts';
+  END IF;
+
+  -- Role allowlist — never trust caller-supplied roles.
+  IF p_role IS NULL OR p_role NOT IN ('staff', 'admin', 'ceo') THEN
+    RAISE EXCEPTION 'Invalid role "%" - must be staff, admin, or ceo', p_role;
+  END IF;
+
+  IF p_user_id IS NULL THEN
+    RAISE EXCEPTION 'user_id is required';
+  END IF;
+
+  INSERT INTO public.profiles (id, first_name, last_name, full_name, email, role, phone)
+  VALUES (p_user_id, p_first_name, p_last_name, p_full_name, p_email, p_role, '')
+  ON CONFLICT (id) DO UPDATE SET
+    first_name = EXCLUDED.first_name,
+    last_name = EXCLUDED.last_name,
+    full_name = EXCLUDED.full_name,
+    email = COALESCE(EXCLUDED.email, profiles.email),
+    role = EXCLUDED.role
+  RETURNING * INTO v_profile;
+
+  RETURN v_profile;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.admin_create_staff_profile(UUID, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.admin_create_staff_profile(UUID, TEXT, TEXT, TEXT, TEXT, TEXT) TO authenticated;
 
 -- Profiles Policies: Users see their own profile; staff/admin/ceo see all
 CREATE POLICY "Users can view own profile"
@@ -117,7 +173,15 @@ CREATE POLICY "Users can insert own profile"
 CREATE POLICY "Users can update own profile."
   ON public.profiles FOR UPDATE
   TO authenticated
-  USING (auth.uid() = id);
+  USING (auth.uid() = id)
+  WITH CHECK (
+    auth.uid() = id
+    AND role = (
+      SELECT p.role
+      FROM public.profiles p
+      WHERE p.id = auth.uid()
+    )
+  );
 
 -- 2. Create Tickets Table
 CREATE TABLE IF NOT EXISTS public.tickets (
@@ -130,6 +194,9 @@ CREATE TABLE IF NOT EXISTS public.tickets (
   phone TEXT,
   category TEXT NOT NULL,
   priority TEXT DEFAULT 'Medium' CHECK (priority IN ('Low', 'Medium', 'High', 'Urgent')),
+  client_urgency TEXT DEFAULT 'Normal' CHECK (client_urgency IN ('Low', 'Normal', 'High', 'Critical')),
+  priority_updated_at TIMESTAMPTZ,
+  priority_updated_by TEXT,
   subject TEXT NOT NULL,
   description TEXT NOT NULL,
   attachment TEXT,
@@ -142,6 +209,12 @@ CREATE TABLE IF NOT EXISTS public.tickets (
 -- Ensure attachment column exists if table was created previously
 ALTER TABLE public.tickets 
   ADD COLUMN IF NOT EXISTS attachment TEXT;
+
+-- Ensure urgency / priority triage columns exist if table was created previously
+ALTER TABLE public.tickets
+  ADD COLUMN IF NOT EXISTS client_urgency TEXT DEFAULT 'Normal',
+  ADD COLUMN IF NOT EXISTS priority_updated_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS priority_updated_by TEXT;
 
 -- Enable RLS for tickets
 ALTER TABLE public.tickets ENABLE ROW LEVEL SECURITY;

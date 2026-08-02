@@ -16,6 +16,8 @@ export default defineConfig({
     },
   },
   server: {
+    // Listen on all interfaces so phones on the same Wi‑Fi can use the Network URL.
+    host: true,
     proxy: {
       // Nominatim usage policy wants an identifying User-Agent; browsers cannot set it.
       // Dev: proxy adds UA. Production: configure the same /api/nominatim reverse proxy

@@ -76,6 +76,7 @@ export function AddressAutocomplete({
 
   const containerRef = useRef(null)
   const debounceRef = useRef(null)
+  const abortRef = useRef(null)
   const requestIdRef = useRef(0)
   const skipSearchRef = useRef(false)
   const inputFocusedRef = useRef(false)
@@ -103,7 +104,11 @@ export function AddressAutocomplete({
     const query = typeof value === 'string' ? value.trim() : ''
     latestQueryRef.current = query
 
-    if (!query || query.length < 2) {
+    if (!query || query.length < 3) {
+      if (abortRef.current) {
+        abortRef.current.abort()
+        abortRef.current = null
+      }
       setSuggestions([])
       setIsOpen(false)
       setIsSearching(false)
@@ -115,12 +120,16 @@ export function AddressAutocomplete({
     if (debounceRef.current) clearTimeout(debounceRef.current)
 
     debounceRef.current = setTimeout(async () => {
+      if (abortRef.current) abortRef.current.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
+
       const reqId = ++requestIdRef.current
       const requestQuery = query
       setIsSearching(true)
       setSearchError('')
       try {
-        const results = await searchAddress(query)
+        const results = await searchAddress(query, { signal: controller.signal })
         if (reqId !== requestIdRef.current) return
         if (latestQueryRef.current !== requestQuery) return
 
@@ -134,6 +143,7 @@ export function AddressAutocomplete({
         }
         setActiveIndex(-1)
       } catch (err) {
+        if (err?.name === 'AbortError') return
         if (reqId !== requestIdRef.current) return
         // Keep typed value; only clear suggestions and show a non-blocking alert.
         setSuggestions([])
@@ -149,6 +159,10 @@ export function AddressAutocomplete({
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
+      if (abortRef.current) {
+        abortRef.current.abort()
+        abortRef.current = null
+      }
     }
   }, [value])
 

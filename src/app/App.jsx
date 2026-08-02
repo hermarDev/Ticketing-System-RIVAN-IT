@@ -18,7 +18,7 @@ import { Footer } from '../layout/Footer'
 import { Navbar } from '../layout/Navbar'
 import { ErrorBoundary } from '../shared/components/ErrorBoundary'
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient'
-import { syncOAuthUser, getCurrentClientSession, saveCurrentClientSession } from '../lib/ticketService'
+import { syncOAuthUser, getCurrentClientSession, saveCurrentClientSession, mergeClientAccountProfiles } from '../lib/ticketService'
 import { ClientDashboardPage } from '../features/client/ClientDashboardPage'
 import { FloatingThemeToggle } from '../shared/components/FloatingThemeToggle'
 import '../styles/app.css'
@@ -33,6 +33,7 @@ function App() {
   const [openFaq, setOpenFaq] = useState(0)
   const [clientAccount, setClientAccountState] = useState(() => getCurrentClientSession())
   const [transitionAccount, setTransitionAccount] = useState(null)
+  const [isGoogleUser, setIsGoogleUser] = useState(false)
 
   const setClientAccount = useCallback((acc) => {
     saveCurrentClientSession(acc)
@@ -78,30 +79,36 @@ function App() {
           return
         }
 
-        const account = await syncOAuthUser(session.user)
-        if (account && isSubscribed) {
-          setIsLoginOpen(false)
-          setIsAccountOpen(false)
-          
-          if (!clientAccount) {
-            setTransitionAccount(account)
-            setTimeout(() => {
-              setClientAccount(account)
-              setTransitionAccount(null)
-            }, 1800)
-          } else {
-            setClientAccount(account)
-          }
+        const synced = await syncOAuthUser(session.user)
+        if (!synced || !isSubscribed) return
 
-          // If user just completed Google OAuth redirect, clean URL fragment/query parameter gracefully
-          if (event === 'SIGNED_IN' || isOAuthReturn) {
-            if (window.history.replaceState) {
-              window.history.replaceState(null, '', window.location.pathname)
-            }
+        const currentSession = getCurrentClientSession()
+        const account = mergeClientAccountProfiles(currentSession, synced)
+        if (!account) return
+
+        setIsGoogleUser(session.user?.app_metadata?.provider === 'google')
+        setIsLoginOpen(false)
+        setIsAccountOpen(false)
+
+        if (!currentSession) {
+          setTransitionAccount(account)
+          setTimeout(() => {
+            const latest = mergeClientAccountProfiles(getCurrentClientSession(), account)
+            if (latest) setClientAccount(latest)
+            setTransitionAccount(null)
+          }, 1800)
+        } else {
+          setClientAccount(account)
+        }
+
+        if (event === 'SIGNED_IN' || isOAuthReturn) {
+          if (window.history.replaceState) {
+            window.history.replaceState(null, '', window.location.pathname)
           }
         }
       } else if (event === 'SIGNED_OUT') {
         setClientAccount(null)
+        setIsGoogleUser(false)
       }
     })
 
@@ -134,7 +141,9 @@ function App() {
   }
 
   const handleAccountCreated = (account) => {
-    setClientAccount(account)
+    const merged = mergeClientAccountProfiles(getCurrentClientSession(), account)
+    setClientAccount(merged)
+    setIsGoogleUser(false)
     setIsAccountOpen(false)
   }
 
@@ -164,6 +173,7 @@ function App() {
         >
           <ClientDashboardPage
             clientAccount={clientAccount}
+            isGoogleUser={isGoogleUser}
             onLogout={handleLogout}
             onUpdateAccount={(updated) => setClientAccount(updated)}
           />

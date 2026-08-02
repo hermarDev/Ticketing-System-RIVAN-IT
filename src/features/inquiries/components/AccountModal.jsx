@@ -11,7 +11,6 @@ import {
   Mail,
   Phone,
   Lock,
-  MapPin,
   Loader2,
   CheckCircle2,
   ArrowRight,
@@ -19,8 +18,15 @@ import {
   Check,
 } from 'lucide-react'
 import { logger } from '../../../lib/logger'
-import { validateRequiredFields, isValidEmail, isValidPhPhone } from '../../../lib/formValidation'
+import {
+  validateRequiredFields,
+  isValidEmail,
+  isValidPhPhone,
+  getPasswordValidationError,
+  mapAuthPasswordError,
+} from '../../../lib/formValidation'
 import { createAccount, loginWithGoogle } from '../../../lib/ticketService'
+import { PasswordRequirementsChecklist } from '../../../shared/components/PasswordRequirementsChecklist'
 
 /**
  * AccountModal — Designed to seamlessly complement the NetOps landing page.
@@ -35,7 +41,6 @@ export function AccountModal({ isOpen, onClose, onAccountCreated, onSwitchToLogi
     company: '',
     email: '',
     phone: '',
-    siteAddress: '',
     password: '',
     confirmPassword: '',
   })
@@ -58,7 +63,7 @@ export function AccountModal({ isOpen, onClose, onAccountCreated, onSwitchToLogi
   }
 
   const requiredFields = useMemo(
-    () => ['firstName', 'lastName', 'company', 'email', 'phone', 'siteAddress', 'password', 'confirmPassword'],
+    () => ['firstName', 'lastName', 'company', 'email', 'phone', 'password', 'confirmPassword'],
     []
   )
 
@@ -79,8 +84,9 @@ export function AccountModal({ isOpen, onClose, onAccountCreated, onSwitchToLogi
     if (form.phone && !isValidPhPhone(form.phone)) {
       nextErrors.phone = 'Must be an 11-digit Philippines mobile number starting with 09 (e.g. 09171234567).'
     }
-    if (form.password && form.password.length < 8) {
-      nextErrors.password = 'Password must be at least 8 characters.'
+    if (form.password) {
+      const passwordError = getPasswordValidationError(form.password)
+      if (passwordError) nextErrors.password = passwordError
     }
     if (form.password && form.confirmPassword && form.password !== form.confirmPassword) {
       nextErrors.confirmPassword = 'Passwords do not match. Please verify.'
@@ -103,26 +109,30 @@ export function AccountModal({ isOpen, onClose, onAccountCreated, onSwitchToLogi
         companyName: form.company,
         email: form.email,
         phone: form.phone,
-        siteAddress: form.siteAddress,
+        siteAddress: '',
         password: form.password,
       })
       setClientId(created.clientId || created.id)
-      onAccountCreated({
-        ...form,
-        fullName: created.fullName || `${form.firstName.trim()} ${form.lastName.trim()}`,
-        companyName: form.company,
-        clientId: created.clientId || created.id,
-        id: created.id,
-      })
+      onAccountCreated(created)
     } catch (err) {
       logger.error('Account creation error:', err)
-      setServerError(err.message || 'Failed to create account. Please try again.')
+      const friendlyPasswordError = mapAuthPasswordError(err.message)
+      if (friendlyPasswordError) {
+        setErrors((current) => ({ ...current, password: friendlyPasswordError }))
+      } else {
+        setServerError(err.message || 'Failed to create account. Please try again.')
+      }
     } finally {
       setLoading(false)
     }
   }
 
-  const passwordsMatch = form.password && form.confirmPassword && form.password === form.confirmPassword
+  const passwordsMatch = Boolean(
+    form.password && form.confirmPassword && form.password === form.confirmPassword
+  )
+  const passwordsMismatch = Boolean(
+    form.password && form.confirmPassword && form.password !== form.confirmPassword
+  )
 
   return (
     <AnimatePresence>
@@ -375,9 +385,10 @@ export function AccountModal({ isOpen, onClose, onAccountCreated, onSwitchToLogi
                     type={showPassword ? 'text' : 'password'}
                     value={form.password}
                     onChange={(e) => updateField('password', e.target.value)}
-                    placeholder="Min. 8 characters"
+                    placeholder="Upper, lower, number, symbol"
                     autoComplete="new-password"
                     required
+                    aria-describedby="account-password-requirements"
                     className="w-full bg-transparent pl-10 pr-10 py-3 text-sm text-slate-950 dark:text-white font-medium placeholder-slate-400 focus:outline-none"
                   />
                   <button
@@ -403,20 +414,31 @@ export function AccountModal({ isOpen, onClose, onAccountCreated, onSwitchToLogi
                     Confirm Password
                   </label>
                   {passwordsMatch && (
-                    <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+                    <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-600 dark:text-emerald-400" aria-live="polite">
                       <Check size={12} /> Passwords Match
+                    </span>
+                  )}
+                  {passwordsMismatch && (
+                    <span className="flex items-center gap-1 text-[10px] font-bold text-rose-600 dark:text-rose-400" aria-live="polite">
+                      <AlertCircle size={12} /> Passwords do not match
                     </span>
                   )}
                 </div>
                 <div className={`relative rounded-xl border bg-slate-50 dark:bg-slate-950 transition-all ${
-                  passwordsMatch 
-                    ? 'border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20' 
-                    : 'border-slate-200 dark:border-slate-700 focus-within:border-slate-900 dark:focus-within:border-slate-100'
+                  passwordsMatch
+                    ? 'border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20'
+                    : passwordsMismatch
+                      ? 'border-rose-500 focus-within:ring-2 focus-within:ring-rose-500/20'
+                      : 'border-slate-200 dark:border-slate-700 focus-within:border-slate-900 dark:focus-within:border-slate-100'
                 }`}>
                   <Lock
                     size={17}
                     className={`absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none ${
-                      passwordsMatch ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'
+                      passwordsMatch
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : passwordsMismatch
+                          ? 'text-rose-600 dark:text-rose-400'
+                          : 'text-slate-400'
                     }`}
                   />
                   <input
@@ -426,6 +448,7 @@ export function AccountModal({ isOpen, onClose, onAccountCreated, onSwitchToLogi
                     placeholder="Re-enter password"
                     autoComplete="new-password"
                     required
+                    aria-invalid={passwordsMismatch || Boolean(errors.confirmPassword)}
                     className="w-full bg-transparent pl-10 pr-10 py-3 text-sm text-slate-950 dark:text-white font-medium placeholder-slate-400 focus:outline-none"
                   />
                   <button
@@ -437,7 +460,7 @@ export function AccountModal({ isOpen, onClose, onAccountCreated, onSwitchToLogi
                     {showConfirmPassword ? <EyeOff size={17} /> : <Eye size={17} />}
                   </button>
                 </div>
-                {errors.confirmPassword && (
+                {errors.confirmPassword && !passwordsMismatch && (
                   <span className="flex items-center gap-1 text-[11px] font-bold text-rose-600 dark:text-rose-400 mt-1">
                     <AlertCircle size={12} /> {errors.confirmPassword}
                   </span>
@@ -445,31 +468,10 @@ export function AccountModal({ isOpen, onClose, onAccountCreated, onSwitchToLogi
               </div>
             </div>
 
-            {/* Site / Installation Address */}
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
-                Site / Installation Address
-              </label>
-              <div className="relative rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 focus-within:border-slate-900 dark:focus-within:border-slate-100 transition-all">
-                <MapPin
-                  size={17}
-                  className="absolute left-3.5 top-3.5 text-slate-400 pointer-events-none"
-                />
-                <textarea
-                  value={form.siteAddress}
-                  onChange={(e) => updateField('siteAddress', e.target.value)}
-                  placeholder="Facility, building floor, street, city, province"
-                  rows={2}
-                  required
-                  className="w-full bg-transparent pl-10 pr-3 py-3 text-sm text-slate-950 dark:text-white font-medium placeholder-slate-400 focus:outline-none resize-none"
-                />
-              </div>
-              {errors.siteAddress && (
-                <span className="flex items-center gap-1 text-[11px] font-bold text-rose-600 dark:text-rose-400 mt-1">
-                  <AlertCircle size={12} /> {errors.siteAddress}
-                </span>
-              )}
-            </div>
+            <PasswordRequirementsChecklist
+              password={form.password}
+              listId="account-password-requirements"
+            />
 
             {/* Success Notification Card */}
             {clientId && (

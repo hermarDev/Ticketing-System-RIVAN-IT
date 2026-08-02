@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { User, Building2, Mail, Phone, Loader2, CheckCircle2, ShieldAlert, KeyRound, Save } from 'lucide-react'
 import { updateClientAccount } from '../../../lib/ticketService'
+import { GmailSendSettings } from './GmailSendSettings'
 import { isValidPhPhone } from '../../../lib/formValidation'
 import {
   formatStoredSiteAddress,
@@ -9,7 +10,7 @@ import {
 } from '../../../lib/locationService'
 import { AddressAutocomplete } from '../../../shared/components/AddressAutocomplete'
 
-export function ClientAccountSettings({ clientAccount, onAccountUpdated, onBack }) {
+export function ClientAccountSettings({ clientAccount, isGoogleUser, onAccountUpdated, onBack }) {
   const [form, setForm] = useState({
     firstName: '',
     lastName: '',
@@ -27,23 +28,36 @@ export function ClientAccountSettings({ clientAccount, onAccountUpdated, onBack 
   // object reference (e.g. App onAuthStateChange / session refresh churn),
   // which would wipe mid-typing siteAddress and other fields.
   const hydratedIdentityRef = useRef('')
+  const hydratedProfileRef = useRef('')
 
   useEffect(() => {
     if (!clientAccount) return
     const identity = `${clientAccount.email || ''}|${clientAccount.id || clientAccount.clientId || ''}`
-    if (hydratedIdentityRef.current === identity) return
+    const profileFingerprint = [
+      clientAccount.firstName,
+      clientAccount.lastName,
+      clientAccount.companyName || clientAccount.company,
+      clientAccount.phone,
+      clientAccount.siteAddress,
+    ].join('|')
+    const hydrateKey = `${identity}::${profileFingerprint}`
+    if (hydratedProfileRef.current === hydrateKey) return
+
+    const previousIdentity = hydratedIdentityRef.current
+    const identityChanged = previousIdentity !== identity
     hydratedIdentityRef.current = identity
+    hydratedProfileRef.current = hydrateKey
 
     const siteParts = splitStoredSiteAddress(clientAccount.siteAddress || '')
-    setForm({
+    setForm((prev) => ({
       firstName: clientAccount.firstName || (clientAccount.fullName ? clientAccount.fullName.split(' ')[0] : ''),
       lastName: clientAccount.lastName || (clientAccount.fullName ? clientAccount.fullName.split(' ').slice(1).join(' ') : ''),
       companyName: clientAccount.companyName || clientAccount.company || '',
       email: clientAccount.email || '',
       phone: clientAccount.phone || '',
-      siteAddress: siteParts.address,
-      unitLandmark: siteParts.unitLandmark,
-    })
+      siteAddress: identityChanged || !prev.siteAddress.trim() ? siteParts.address : prev.siteAddress,
+      unitLandmark: identityChanged || !prev.unitLandmark.trim() ? siteParts.unitLandmark : prev.unitLandmark,
+    }))
   }, [clientAccount])
 
   const handleSubmit = async (e) => {
@@ -82,8 +96,6 @@ export function ClientAccountSettings({ clientAccount, onAccountUpdated, onBack 
       setLoading(false)
     }
   }
-
-  const isGoogleUser = form.companyName === 'Google User' || !clientAccount?.phone
 
   return (
     <div className="space-y-5">
@@ -256,6 +268,12 @@ export function ClientAccountSettings({ clientAccount, onAccountUpdated, onBack 
           </button>
         </div>
       </form>
+
+      <GmailSendSettings
+        isGoogleUser={isGoogleUser}
+        userEmail={clientAccount?.email || ''}
+        userId={clientAccount?.id || ''}
+      />
     </div>
   )
 }

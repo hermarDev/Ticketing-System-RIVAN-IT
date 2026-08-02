@@ -2,9 +2,31 @@ import { isSupabaseConfigured, signOutLocal, supabase } from './supabaseClient'
 import { generateClientId, generateTicketId } from './idGenerators'
 import { logger } from './logger'
 import { dispatchNotification } from './notificationService'
-import { sanitizeInput } from './formValidation'
+import {
+  sanitizeInput,
+  isValidEmail,
+  getPasswordValidationError,
+  mapAuthPasswordError,
+} from './formValidation'
+import {
+  normalizeTicketPriority,
+  resolveClientUrgencyDisplay,
+  resolveCreateUrgencyAndPriority,
+  applyLocalPriorityUpdate,
+} from './ticketPriority'
 
 export { sanitizeInput }
+
+export {
+  CLIENT_URGENCIES,
+  TICKET_PRIORITIES,
+  normalizeClientUrgency,
+  normalizeTicketPriority,
+  mapUrgencyToPriority,
+  mapPriorityToUrgency,
+  resolveClientUrgencyDisplay,
+  resolveCreateUrgencyAndPriority,
+} from './ticketPriority'
 
 export {
   setActiveTicketId,
@@ -21,6 +43,7 @@ const LOCAL_STORAGE_TICKETS = 'netops_tickets_v1'
 const LOCAL_STORAGE_ACCOUNTS = 'netops_accounts_v1'
 const LOCAL_STORAGE_REPLIES = 'netops_replies_v1'
 const LOCAL_STORAGE_SESSION_CLIENT = 'netops_session_client_v1'
+const MAX_ATTACHMENT_REFERENCE_BYTES = 50000
 
 const getLocalData = (key, defaultValue = []) => {
   try {
@@ -37,6 +60,20 @@ const setLocalData = (key, value) => {
     localStorage.setItem(key, JSON.stringify(value))
   } catch (e) {
     logger.error('Error saving to localStorage:', e)
+  }
+}
+
+function hasInlineAttachmentData(attachment) {
+  if (typeof attachment !== 'string') return false
+  const trimmed = attachment.trim()
+  if (!trimmed) return false
+  if (trimmed.includes('data:')) return true
+  if (!trimmed.startsWith('[')) return false
+  try {
+    const parsed = JSON.parse(trimmed)
+    return Array.isArray(parsed) && parsed.some((value) => typeof value === 'string' && value.startsWith('data:'))
+  } catch {
+    return false
   }
 }
 
@@ -219,6 +256,9 @@ function formatTicketRow(t, staffNameMap = new Map()) {
     phone: t.phone,
     category: t.category,
     priority: t.priority,
+    clientUrgency: resolveClientUrgencyDisplay(t),
+    priorityUpdatedAt: t.priority_updated_at || t.priorityUpdatedAt || null,
+    priorityUpdatedBy: t.priority_updated_by || t.priorityUpdatedBy || null,
     subject: t.subject,
     description: t.description,
     attachment: t.attachment || '',
@@ -252,6 +292,51 @@ export function getCurrentClientSession() {
   return getLocalData(LOCAL_STORAGE_SESSION_CLIENT, null)
 }
 
+const PLACEHOLDER_COMPANY_NAMES = new Set(['Google User', 'Client', 'Company'])
+
+function pickRicherString(existing, incoming) {
+  const a = String(existing ?? '').trim()
+  const b = String(incoming ?? '').trim()
+  return a || b
+}
+
+function pickCompanyName(existing, incoming) {
+  const a = String(existing ?? '').trim()
+  const b = String(incoming ?? '').trim()
+  const aPlaceholder = !a || PLACEHOLDER_COMPANY_NAMES.has(a)
+  const bPlaceholder = !b || PLACEHOLDER_COMPANY_NAMES.has(b)
+  if (!aPlaceholder) return a
+  if (!bPlaceholder) return b
+  return a || b
+}
+
+/**
+ * Merges two client profile snapshots, preferring non-empty / non-placeholder values.
+ * Used when auth listener and signup handler both update session state.
+ * @param {Object|null|undefined} existing
+ * @param {Object|null|undefined} incoming
+ * @returns {Object|null}
+ */
+export function mergeClientAccountProfiles(existing, incoming) {
+  if (!incoming) return existing || null
+  if (!existing) return incoming
+
+  return {
+    ...incoming,
+    id: existing.id || incoming.id,
+    clientId: existing.clientId || incoming.clientId,
+    firstName: pickRicherString(existing.firstName, incoming.firstName),
+    lastName: pickRicherString(existing.lastName, incoming.lastName),
+    fullName: pickRicherString(existing.fullName, incoming.fullName),
+    companyName: pickCompanyName(existing.companyName || existing.company, incoming.companyName || incoming.company),
+    email: pickRicherString(existing.email, incoming.email),
+    phone: pickRicherString(existing.phone, incoming.phone),
+    siteAddress: pickRicherString(existing.siteAddress, incoming.siteAddress),
+    gmailSendEnabled: incoming.gmailSendEnabled ?? existing.gmailSendEnabled ?? false,
+    gmailReplyTo: incoming.gmailReplyTo ?? existing.gmailReplyTo ?? null,
+  }
+}
+
 /**
  * Creates a new client account via Supabase Auth and inserts a matching `clients` row.
  * Falls back to local storage when Supabase is not configured.
@@ -259,24 +344,41 @@ export function getCurrentClientSession() {
  * @returns {Promise<Object>} Created client profile object
  */
 export async function createAccount(accountData) {
+  const passwordPolicyError = getPasswordValidationError(accountData.password)
+  if (passwordPolicyError) {
+    throw new Error(passwordPolicyError)
+  }
+
   if (isSupabaseConfigured && supabase) {
-    // 1. Create auth user with Supabase Auth
+    const generatedClientId = generateClientId()
+    const firstName = sanitizeInput(accountData.firstName || '', 100)
+    const lastName = sanitizeInput(accountData.lastName || '', 100)
+    const fullName = sanitizeInput(accountData.fullName || `${firstName} ${lastName}`, 200).trim()
+    const companyName = sanitizeInput(accountData.companyName || accountData.company || '', 200)
+    const phone = sanitizeInput(accountData.phone || '', 20)
+    const normalizedEmail = accountData.email.toLowerCase().trim()
+
+    // 1. Create auth user with Supabase Auth (metadata for trigger + syncOAuthUser)
     const { data: authData, error: authError } = await supabase.auth.signUp({
-      email: accountData.email.toLowerCase().trim(),
+      email: normalizedEmail,
       password: accountData.password,
+      options: {
+        data: {
+          first_name: firstName,
+          last_name: lastName,
+          full_name: fullName,
+          company_name: companyName,
+          phone,
+        },
+      },
     })
 
     if (authError) {
       if (authError.message?.includes('already registered')) {
         throw new Error('An account with this email already exists. Please log in instead.')
       }
-      throw new Error(authError.message)
+      throw new Error(mapAuthPasswordError(authError.message) || authError.message)
     }
-
-    const generatedClientId = generateClientId()
-    const firstName = sanitizeInput(accountData.firstName || '', 100)
-    const lastName = sanitizeInput(accountData.lastName || '', 100)
-    const fullName = sanitizeInput(accountData.fullName || `${firstName} ${lastName}`, 200).trim()
 
     // 2. Insert client profile row linked to auth user
     const { data, error } = await supabase
@@ -288,10 +390,10 @@ export async function createAccount(accountData) {
           first_name: firstName,
           last_name: lastName,
           full_name: fullName,
-          company_name: sanitizeInput(accountData.companyName, 200),
-          email: accountData.email.toLowerCase().trim(),
-          phone: sanitizeInput(accountData.phone, 20),
-          site_address: sanitizeInput(accountData.siteAddress, 500),
+          company_name: companyName,
+          email: normalizedEmail,
+          phone,
+          site_address: sanitizeInput(accountData.siteAddress || '', 500),
         },
       ])
       .select()
@@ -311,7 +413,7 @@ export async function createAccount(accountData) {
       throw new Error(error.message)
     }
 
-    // 3. Ensure security profile row exists with role = 'client'
+    // 3. Ensure security profile row exists with role = 'client' (update if trigger already created sparse row)
     if (authData.user?.id) {
       await supabase.from('profiles').upsert([
         {
@@ -319,12 +421,12 @@ export async function createAccount(accountData) {
           first_name: firstName,
           last_name: lastName,
           full_name: fullName,
-          email: accountData.email.toLowerCase().trim(),
-          phone: sanitizeInput(accountData.phone, 20),
-          company_name: sanitizeInput(accountData.companyName, 200),
+          email: normalizedEmail,
+          phone,
+          company_name: companyName,
           role: 'client',
         },
-      ], { onConflict: 'id', ignoreDuplicates: true })
+      ], { onConflict: 'id' })
     }
 
     return {
@@ -333,9 +435,9 @@ export async function createAccount(accountData) {
       firstName: data.first_name || firstName,
       lastName: data.last_name || lastName,
       fullName: data.full_name || fullName,
-      companyName: data.company_name,
+      companyName: data.company_name || companyName,
       email: data.email,
-      phone: data.phone,
+      phone: data.phone || phone,
       siteAddress: data.site_address,
     }
   }
@@ -359,10 +461,10 @@ export async function createAccount(accountData) {
     firstName,
     lastName,
     fullName,
-    companyName: sanitizeInput(accountData.companyName, 200),
+    companyName: sanitizeInput(accountData.companyName || accountData.company || '', 200),
     email: accountData.email.toLowerCase().trim(),
-    phone: sanitizeInput(accountData.phone, 20),
-    siteAddress: sanitizeInput(accountData.siteAddress, 500),
+    phone: sanitizeInput(accountData.phone || '', 20),
+    siteAddress: sanitizeInput(accountData.siteAddress || '', 500),
     createdAt: new Date().toISOString(),
   }
   accounts.push(newAccount)
@@ -588,8 +690,9 @@ export async function requestPasswordResetForEmail(email, redirectTo) {
  */
 export async function completePasswordRecovery(newPassword) {
   const password = String(newPassword || '')
-  if (!password || password.length < 8) {
-    throw new Error('Password must be at least 8 characters.')
+  const passwordPolicyError = getPasswordValidationError(password)
+  if (passwordPolicyError) {
+    throw new Error(passwordPolicyError)
   }
   if (!isSupabaseConfigured || !supabase) {
     throw new Error('Supabase is not configured. Please set your credentials in .env file.')
@@ -601,7 +704,44 @@ export async function completePasswordRecovery(newPassword) {
   }
 
   const { error: updateError } = await supabase.auth.updateUser({ password })
-  if (updateError) throw new Error(updateError.message || 'Failed to update password.')
+  if (updateError) {
+    throw new Error(mapAuthPasswordError(updateError.message) || updateError.message || 'Failed to update password.')
+  }
+}
+
+/**
+ * Changes password for the currently logged-in user after verifying the current password.
+ * @param {{ email: string, currentPassword: string, newPassword: string }} params
+ * @returns {Promise<void>}
+ */
+export async function changeAuthenticatedUserPassword({ email, currentPassword, newPassword }) {
+  const normalizedEmail = String(email || '').toLowerCase().trim()
+  const current = String(currentPassword || '')
+  const next = String(newPassword || '')
+
+  if (!normalizedEmail) throw new Error('Please sign in again to change your password.')
+  if (!current) throw new Error('Please enter your current password.')
+  const passwordPolicyError = getPasswordValidationError(next)
+  if (passwordPolicyError) {
+    throw new Error(passwordPolicyError)
+  }
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error('Supabase is not configured. Please set your credentials in .env file.')
+  }
+
+  const { error: signInError } = await supabase.auth.signInWithPassword({
+    email: normalizedEmail,
+    password: current,
+  })
+
+  if (signInError) {
+    throw new Error('Current password is incorrect. Please try again.')
+  }
+
+  const { error: updateError } = await supabase.auth.updateUser({ password: next })
+  if (updateError) {
+    throw new Error(mapAuthPasswordError(updateError.message) || updateError.message || 'Failed to update password.')
+  }
 }
 
 /**
@@ -614,6 +754,12 @@ export async function syncOAuthUser(authUser) {
 
   const email = authUser.email?.toLowerCase().trim()
   if (!email) return null
+
+  const authProvider = authUser.app_metadata?.provider || 'email'
+  const isGoogleOAuth =
+    authProvider === 'google' ||
+    (Array.isArray(authUser.app_metadata?.providers) &&
+      authUser.app_metadata.providers.includes('google'))
 
   try {
     // 0. Check if this auth user has a profile in profiles table
@@ -643,30 +789,66 @@ export async function syncOAuthUser(authUser) {
           email: email,
           role: 'client',
         },
-      ], { onConflict: 'id', ignoreDuplicates: true })
+      ], { onConflict: 'id' })
+    }
+
+    const mapClientRow = (row, fallbacks = {}) => {
+      const rowFirst = row.first_name || fallbacks.firstName || (row.full_name ? row.full_name.split(' ')[0] : '')
+      const rowLast =
+        row.last_name ||
+        fallbacks.lastName ||
+        (row.full_name ? row.full_name.split(' ').slice(1).join(' ') : '')
+      return {
+        id: row.id,
+        clientId: row.client_id,
+        firstName: rowFirst,
+        lastName: rowLast,
+        fullName: row.full_name || `${rowFirst} ${rowLast}`.trim(),
+        companyName: row.company_name || fallbacks.companyName || 'Client',
+        email: row.email,
+        phone: row.phone || '',
+        siteAddress: row.site_address || '',
+        gmailSendEnabled: row.gmail_send_enabled ?? false,
+        gmailReplyTo: row.gmail_reply_to ?? null,
+      }
+    }
+
+    const fetchClientByEmail = async () => {
+      const { data } = await supabase
+        .from('clients')
+        .select('id, client_id, auth_user_id, first_name, last_name, full_name, company_name, email, phone, site_address, gmail_send_enabled, gmail_reply_to')
+        .eq('email', email)
+        .maybeSingle()
+      return data
     }
 
     // 1. Try to fetch existing client row by email
-    const { data: existingClient } = await supabase
-      .from('clients')
-      .select('*')
-      .eq('email', email)
-      .maybeSingle()
+    let existingClient = await fetchClientByEmail()
 
     if (existingClient) {
-      const firstName = existingClient.first_name || (existingClient.full_name ? existingClient.full_name.split(' ')[0] : '')
-      const lastName = existingClient.last_name || (existingClient.full_name ? existingClient.full_name.split(' ').slice(1).join(' ') : '')
-      return {
-        id: existingClient.id,
-        clientId: existingClient.client_id,
-        firstName,
-        lastName,
-        fullName: existingClient.full_name || `${firstName} ${lastName}`.trim(),
-        companyName: existingClient.company_name || 'Client',
-        email: existingClient.email,
-        phone: existingClient.phone || '',
-        siteAddress: existingClient.site_address || '',
+      if (!existingClient.auth_user_id && authUser.id) {
+        await supabase
+          .from('clients')
+          .update({ auth_user_id: authUser.id })
+          .eq('id', existingClient.id)
       }
+      return mapClientRow(existingClient)
+    }
+
+    // Email/password signup: createAccount may still be inserting — brief retry before sparse auto-create
+    if (!isGoogleOAuth) {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      existingClient = await fetchClientByEmail()
+      if (existingClient) {
+        if (!existingClient.auth_user_id && authUser.id) {
+          await supabase
+            .from('clients')
+            .update({ auth_user_id: authUser.id })
+            .eq('id', existingClient.id)
+        }
+        return mapClientRow(existingClient)
+      }
+      return null
     }
 
     // 2. Auto-create client profile row for first-time Google OAuth user
@@ -692,49 +874,23 @@ export async function syncOAuthUser(authUser) {
 
     if (error) {
       // Conflict from concurrent insert — re-fetch the existing row
-      const { data: existingRow } = await supabase
-        .from('clients')
-        .select('*')
-        .eq('email', email)
-        .maybeSingle()
+      const existingRow = await fetchClientByEmail()
       if (existingRow) {
-        return {
-          id: existingRow.id,
-          clientId: existingRow.client_id,
-          firstName: existingRow.first_name || firstName,
-          lastName: existingRow.last_name || lastName,
-          fullName: existingRow.full_name || fullName,
-          companyName: existingRow.company_name || 'Google User',
-          email: existingRow.email,
-          phone: existingRow.phone || '',
-          siteAddress: existingRow.site_address || '',
-        }
+        return mapClientRow(existingRow, {
+          firstName,
+          lastName,
+          companyName: 'Google User',
+        })
       }
       logger.warn('Error auto-creating OAuth client profile:', error.message)
-      return {
-        id: authUser.id,
-        clientId: generatedClientId,
-        firstName,
-        lastName,
-        fullName,
-        companyName: 'Google User',
-        email,
-        phone: '',
-        siteAddress: '',
-      }
+      return null
     }
 
-    return {
-      id: newClient.id,
-      clientId: newClient.client_id,
-      firstName: newClient.first_name || firstName,
-      lastName: newClient.last_name || lastName,
-      fullName: newClient.full_name || fullName,
+    return mapClientRow(newClient, {
+      firstName,
+      lastName,
       companyName: newClient.company_name,
-      email: newClient.email,
-      phone: newClient.phone,
-      siteAddress: newClient.site_address,
-    }
+    })
   } catch (err) {
     logger.error('Exception in syncOAuthUser:', err)
     return null
@@ -756,7 +912,10 @@ function pruneRecentTicketSubmissions() {
 
 /**
  * Submits a new support ticket to Supabase with idempotency guard; falls back to local storage.
- * @param {Object} ticketData - Ticket form fields (email, subject, description, category, priority, etc.)
+ * Client urgency is validated; ops priority is always auto-triaged (client priority ignored).
+ * Does not set priority_updated_at / priority_updated_by on create.
+ *
+ * @param {Object} ticketData - Ticket form fields (email, subject, description, category, clientUrgency, etc.)
  * @returns {Promise<Object>} Created ticket object
  */
 export async function createTicket(ticketData) {
@@ -772,7 +931,18 @@ export async function createTicket(ticketData) {
     return cached.ticket
   }
 
+  const { clientUrgency, priority } = resolveCreateUrgencyAndPriority(ticketData)
   const ticketNumber = generateTicketId()
+  const attachmentValue = typeof ticketData.attachment === 'string' ? ticketData.attachment.trim() : ''
+
+  if (isSupabaseConfigured && supabase) {
+    if (hasInlineAttachmentData(attachmentValue)) {
+      throw new Error('Attachment upload failed. Please re-upload files and try again.')
+    }
+    if (attachmentValue.length > MAX_ATTACHMENT_REFERENCE_BYTES) {
+      throw new Error('Attachment payload is too large. Please remove large files and try again.')
+    }
+  }
 
   if (isSupabaseConfigured && supabase) {
     // Get current auth session user ID if available
@@ -786,10 +956,11 @@ export async function createTicket(ticketData) {
       email: ticketData.email?.toLowerCase().trim(),
       phone: sanitizeInput(ticketData.phone, 20) || '',
       category: sanitizeInput(ticketData.category, 100),
-      priority: ticketData.priority || 'Medium',
+      client_urgency: clientUrgency,
+      priority,
       subject: sanitizeInput(ticketData.subject, 300),
       description: sanitizeInput(ticketData.description, 5000),
-      attachment: typeof ticketData.attachment === 'string' ? ticketData.attachment.trim() : '',
+      attachment: attachmentValue,
       status: 'New',
     }
 
@@ -814,6 +985,7 @@ export async function createTicket(ticketData) {
           email: payload.email,
           phone: payload.phone,
           category: payload.category,
+          client_urgency: payload.client_urgency,
           priority: payload.priority,
           subject: payload.subject,
           description: payload.description,
@@ -841,6 +1013,7 @@ export async function createTicket(ticketData) {
         email: data.email,
         phone: data.phone,
         category: data.category,
+        clientUrgency: data.client_urgency || clientUrgency,
         priority: data.priority,
         subject: data.subject,
         description: data.description,
@@ -869,7 +1042,9 @@ export async function createTicket(ticketData) {
     email: ticketData.email,
     phone: ticketData.phone || '',
     category: ticketData.category,
-    priority: ticketData.priority || 'Medium',
+    clientUrgency,
+    client_urgency: clientUrgency,
+    priority,
     subject: ticketData.subject,
     description: ticketData.description,
     attachment: ticketData.attachment || '',
@@ -1010,6 +1185,92 @@ export async function updateTicketStatus(ticketId, newStatus) {
 
   if (typeof window !== 'undefined') {
     const payload = { type: 'TICKET_UPDATED', ticketId, status }
+    window.dispatchEvent(new CustomEvent('netops_ticket_updated', { detail: payload }))
+    try {
+      if ('BroadcastChannel' in window) {
+        const bc = new BroadcastChannel('netops_live_chat')
+        bc.postMessage(payload)
+        bc.close()
+      }
+    } catch {
+      // silent
+    }
+  }
+
+  return updated
+}
+
+/**
+ * Updates operational priority of a ticket by ID or ticket number (staff triage).
+ * Sets priority_updated_at / priority_updated_by. When Supabase is configured it is
+ * the source of truth: local storage and broadcasts update only after a successful DB write.
+ *
+ * @param {string} ticketId - Ticket UUID or ticket number (e.g. "NET-001")
+ * @param {string} newPriority - Ops priority: Low | Medium | High | Urgent
+ * @param {string|null|undefined} staffIdentity - Staff email/name string for priority_updated_by
+ * @returns {Promise<Array>} Updated local tickets array
+ * @throws {Error} When priority is invalid or a configured Supabase update fails
+ */
+export async function updateTicketPriority(ticketId, newPriority, staffIdentity) {
+  const priority = normalizeTicketPriority(newPriority)
+  if (!priority) {
+    const message = `Invalid ticket priority: ${typeof newPriority === 'string' ? newPriority : String(newPriority)}`
+    logger.error(message)
+    throw new Error(message)
+  }
+
+  const updatedAt = new Date().toISOString()
+  const priorityUpdatedBy =
+    typeof staffIdentity === 'string' && staffIdentity.trim()
+      ? staffIdentity.trim()
+      : staffIdentity == null || staffIdentity === ''
+        ? null
+        : String(staffIdentity)
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const isNetNumber = typeof ticketId === 'string' && ticketId.startsWith('NET-')
+      const targetColumn = isNetNumber ? 'ticket_number' : 'id'
+      const updatePayload = {
+        priority,
+        priority_updated_at: updatedAt,
+        priority_updated_by: priorityUpdatedBy,
+        updated_at: updatedAt,
+      }
+
+      const { error } = await supabase
+        .from('tickets')
+        .update(updatePayload)
+        .eq(targetColumn, ticketId)
+
+      if (error) {
+        logger.warn('Supabase priority update fallback attempt:', error.message)
+        const { error: retryError } = await supabase
+          .from('tickets')
+          .update(updatePayload)
+          .eq(isNetNumber ? 'id' : 'ticket_number', ticketId)
+        if (retryError) {
+          throw new Error(`Failed to update ticket priority: ${retryError.message}`)
+        }
+      }
+    } catch (err) {
+      logger.error('Supabase updateTicketPriority exception:', err)
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+  }
+
+  const tickets = getLocalData(LOCAL_STORAGE_TICKETS, [])
+  const updated = applyLocalPriorityUpdate(
+    tickets,
+    ticketId,
+    priority,
+    priorityUpdatedBy,
+    updatedAt,
+  )
+  setLocalData(LOCAL_STORAGE_TICKETS, updated)
+
+  if (typeof window !== 'undefined') {
+    const payload = { type: 'PRIORITY_UPDATED', ticketId, priority }
     window.dispatchEvent(new CustomEvent('netops_ticket_updated', { detail: payload }))
     try {
       if ('BroadcastChannel' in window) {
@@ -1447,6 +1708,87 @@ export function subscribeToAllTickets(callback) {
 }
 
 /**
+ * Creates a staff, admin, or CEO account via Supabase Auth and creates the
+ * `profiles` row via the admin-only SECURITY DEFINER RPC (a client-side upsert
+ * of a staff/admin/ceo row is impossible under the canonical profiles RLS).
+ * @param {Object} accountData - firstName, lastName, fullName, email, password, role
+ * @returns {Promise<Object>} Created staff profile summary
+ */
+const STAFF_ROLE_ALLOWLIST = ['staff', 'admin', 'ceo']
+
+export async function createStaffAccount(accountData) {
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error('Supabase is not configured. Please set up your .env credentials.')
+  }
+
+  const passwordPolicyError = getPasswordValidationError(accountData.password)
+  if (passwordPolicyError) {
+    throw new Error(passwordPolicyError)
+  }
+
+  const normalizedEmail = String(accountData.email || '').toLowerCase().trim()
+  const firstName = sanitizeInput(accountData.firstName || '', 100)
+  const lastName = sanitizeInput(accountData.lastName || '', 100)
+  const fullName = sanitizeInput(accountData.fullName || `${firstName} ${lastName}`, 200).trim()
+  const role = accountData.role || 'staff'
+
+  if (!STAFF_ROLE_ALLOWLIST.includes(role)) {
+    throw new Error(`Invalid role "${role}". Must be one of: ${STAFF_ROLE_ALLOWLIST.join(', ')}.`)
+  }
+
+  const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+    email: normalizedEmail,
+    password: accountData.password,
+    options: {
+      data: {
+        first_name: firstName,
+        last_name: lastName,
+        full_name: fullName,
+        role,
+      },
+    },
+  })
+
+  if (signUpError) {
+    if (signUpError.message?.includes('already registered')) {
+      throw new Error('An account with this email already exists.')
+    }
+    throw new Error(mapAuthPasswordError(signUpError.message) || signUpError.message)
+  }
+
+  if (!signUpData.user?.id) {
+    throw new Error('Failed to create staff account.')
+  }
+
+  // The canonical RLS schema only allows a user to insert their own profile
+  // with role='client' and to update their own profile, so a client-side upsert
+  // of a staff/admin/ceo row always fails (leaving an orphan auth user). Use the
+  // admin-only SECURITY DEFINER function instead, which validates the caller is
+  // admin/ceo and enforces the role allowlist server-side.
+  const { error: profileError } = await supabase.rpc('admin_create_staff_profile', {
+    p_user_id: signUpData.user.id,
+    p_first_name: firstName,
+    p_last_name: lastName,
+    p_full_name: fullName,
+    p_email: normalizedEmail,
+    p_role: role,
+  })
+
+  if (profileError) {
+    throw new Error(profileError.message)
+  }
+
+  return {
+    id: signUpData.user.id,
+    firstName,
+    lastName,
+    fullName,
+    email: normalizedEmail,
+    role,
+  }
+}
+
+/**
  * Updates a staff or admin profile row in the Supabase `profiles` table.
  * @param {string} userId - Auth user UUID of the staff member
  * @param {Object} updateData - Profile fields to update (firstName, lastName, companyName, phone)
@@ -1499,6 +1841,83 @@ export async function updateStaffProfile(userId, updateData) {
     fullName,
     companyName,
     phone,
+  }
+}
+
+// Local storage key prefix for Gmail settings fallback
+const LOCAL_STORAGE_GMAIL_SETTINGS_PREFIX = 'gmailSettings_'
+
+/**
+ * Persists Gmail send-as / Reply-To preferences for a client account.
+ *
+ * @param {string} userId - Auth user UUID (used only as fallback storage key)
+ * @param {{ gmailSendEnabled: boolean, gmailReplyTo?: string|null }} settings
+ * @returns {Promise<{ success: true }>}
+ * @throws {Error} When gmailReplyTo is provided but not a valid email address
+ */
+export async function updateGmailSettings(userId, { gmailSendEnabled, gmailReplyTo }) {
+  const enabled = Boolean(gmailSendEnabled)
+  const replyTo = typeof gmailReplyTo === 'string' && gmailReplyTo.trim() ? gmailReplyTo.trim() : null
+
+  if (replyTo !== null && !isValidEmail(replyTo)) {
+    throw new Error('gmailReplyTo must be a valid email address.')
+  }
+
+  if (isSupabaseConfigured && supabase) {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user?.id) throw new Error('No authenticated user session.')
+    const { error } = await supabase
+      .from('clients')
+      .update({
+        gmail_send_enabled: enabled,
+        gmail_reply_to: replyTo,
+      })
+      .eq('auth_user_id', user.id)
+
+    if (error) {
+      logger.error('Supabase updateGmailSettings error:', error)
+      throw new Error(error.message || 'Failed to update Gmail settings.')
+    }
+
+    return { success: true }
+  }
+
+  // Fallback: local storage
+  setLocalData(`${LOCAL_STORAGE_GMAIL_SETTINGS_PREFIX}${userId}`, { gmailSendEnabled: enabled, gmailReplyTo: replyTo })
+  return { success: true }
+}
+
+/**
+ * Retrieves Gmail send-as / Reply-To preferences for a client account.
+ *
+ * @param {string} userId - Auth user UUID (used only as fallback storage key)
+ * @returns {Promise<{ gmailSendEnabled: boolean, gmailReplyTo: string|null }>}
+ */
+export async function getClientGmailSettings(userId) {
+  if (isSupabaseConfigured && supabase) {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user?.id) throw new Error('No authenticated user session.')
+    const { data, error } = await supabase
+      .from('clients')
+      .select('gmail_send_enabled, gmail_reply_to')
+      .eq('auth_user_id', user.id)
+      .maybeSingle()
+
+    if (error) {
+      logger.warn('Supabase getClientGmailSettings error:', error.message)
+    }
+
+    return {
+      gmailSendEnabled: data?.gmail_send_enabled ?? false,
+      gmailReplyTo: data?.gmail_reply_to ?? null,
+    }
+  }
+
+  // Fallback: local storage
+  const stored = getLocalData(`${LOCAL_STORAGE_GMAIL_SETTINGS_PREFIX}${userId}`, null)
+  return {
+    gmailSendEnabled: stored?.gmailSendEnabled ?? false,
+    gmailReplyTo: stored?.gmailReplyTo ?? null,
   }
 }
 

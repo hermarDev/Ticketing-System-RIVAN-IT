@@ -4,11 +4,12 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host",
     "build": "vite build",
     "lint": "oxlint",
     "test": "node --test src/**/*.test.js",
-    "preview": "vite preview"
+    "verify:db": "node scripts/verify-db.mjs",
+    "preview": "vite preview --host"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.8",
@@ -26,6 +27,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "oxlint": "^1.71.0",
+    "pg": "^8.22.0",
     "vite": "^8.1.1"
   }
 }

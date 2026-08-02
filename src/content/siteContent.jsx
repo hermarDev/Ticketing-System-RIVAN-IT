@@ -67,7 +67,7 @@ export const features = [
 export const workflow = [
   [
     'Register Your Account',
-    'Create an account with your name, company, contact number, and site address. This takes one minute and only needs to be done once.',
+    'Create an account with your name, company, and contact number. Add your site address later in My Account when you are ready to file tickets.',
   ],
   [
     'Describe Your Concern',

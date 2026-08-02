@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ClipboardCheck, MailCheck, Paperclip, X, Loader2, AlertCircle } from 'lucide-react'
-import { priorities, requestTypes } from '../../../config/serviceOptions'
+import { requestTypes } from '../../../config/serviceOptions'
 import { Field } from '../../../shared/components/Field'
 import { AddressAutocomplete } from '../../../shared/components/AddressAutocomplete'
 import { validateRequiredFields, isValidEmail } from '../../../lib/formValidation'
@@ -13,6 +13,17 @@ import {
 import { supabase, isSupabaseConfigured } from '../../../lib/supabaseClient'
 import { logger } from '../../../lib/logger'
 
+const SUPABASE_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+
+const formatFileSizeMb = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+
+const URGENCY_OPTIONS = [
+  { value: 'Normal', label: 'Normal — Routine / non-critical' },
+  { value: 'Low', label: 'Low — Minor request or suggestion' },
+  { value: 'High', label: 'High — Key feature impaired' },
+  { value: 'Critical', label: 'Critical — Complete work blockage / outage' },
+]
+
 export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
   const [form, setForm] = useState({
     firstName: '',
@@ -21,7 +32,7 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
     company: '',
     department: requestTypes[0],
     subject: '',
-    priority: priorities[1],
+    clientUrgency: 'Normal',
     productModel: '',
     siteLocation: '',
     unitLandmark: '',
@@ -86,9 +97,18 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
     if (files.length === 0) return
 
     setIsUploading(true)
+    setErrors((prev) => ({ ...prev, submit: '' }))
     const newItems = []
+    const uploadFailures = []
 
     for (const file of files) {
+      if (file.size > SUPABASE_ATTACHMENT_MAX_BYTES) {
+        uploadFailures.push(
+          `${file.name} exceeds the 10MB upload limit (${formatFileSizeMb(file.size)}).`,
+        )
+        continue
+      }
+
       let uploadedUrl = ''
 
       if (isSupabaseConfigured && supabase) {
@@ -108,13 +128,24 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
             if (publicUrlData?.publicUrl) {
               uploadedUrl = publicUrlData.publicUrl
             }
+          } else {
+            uploadFailures.push(
+              `${file.name} failed to upload${error?.message ? `: ${error.message}` : '.'}`,
+            )
           }
         } catch (err) {
           logger.warn('Supabase storage upload returned error:', err)
+          uploadFailures.push(
+            `${file.name} failed to upload${err?.message ? `: ${err.message}` : '.'}`,
+          )
         }
       }
 
       if (!uploadedUrl) {
+        if (isSupabaseConfigured && supabase) {
+          continue
+        }
+
         uploadedUrl = await new Promise((resolve) => {
           const reader = new FileReader()
           reader.onload = (e) => resolve(e.target.result)
@@ -137,6 +168,13 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
       return updated
     })
 
+    if (uploadFailures.length > 0) {
+      setErrors((prev) => ({
+        ...prev,
+        submit: `Attachment upload failed. ${uploadFailures.join(' ')}`,
+      }))
+    }
+
     setIsUploading(false)
     event.target.value = ''
   }
@@ -158,11 +196,16 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
     setErrors(nextErrors)
     return Object.keys(nextErrors).length === 0
   }
+  const hasAttachmentUploadError = typeof errors.submit === 'string' && errors.submit.startsWith('Attachment upload failed.')
 
   const handleSubmit = async (event) => {
     event.preventDefault()
     // Anti-duplicate protection: prevent submit if already submitting or if ticket was already created
     if (isSubmitting || ticketId) return
+    if (isUploading) {
+      setErrors((prev) => ({ ...prev, submit: 'Please wait for all attachments to finish uploading.' }))
+      return
+    }
     if (!validate()) return
 
     setIsSubmitting(true)
@@ -193,7 +236,7 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
         email: form.email,
         phone: account?.phone || '',
         category: form.department,
-        priority: form.priority,
+        clientUrgency: form.clientUrgency,
         subject: form.subject,
         description: `${productTag}${siteTag}\n\n${form.description}`.trim(),
         attachment: attachmentPayload,
@@ -288,10 +331,14 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
                   ))}
                 </select>
               </Field>
-              <Field label="Priority">
-                <select value={form.priority} onChange={(event) => updateField('priority', event.target.value)}>
-                  {priorities.map((priority) => (
-                    <option key={priority}>{priority}</option>
+              <Field label="Urgency / Work Impact">
+                <select
+                  value={form.clientUrgency}
+                  onChange={(event) => updateField('clientUrgency', event.target.value)}
+                  aria-label="Reported urgency / work impact"
+                >
+                  {URGENCY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
               </Field>
@@ -347,6 +394,9 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
                     disabled={isUploading}
                   />
                 </label>
+                <p className={`text-xs ${hasAttachmentUploadError ? 'text-red-500 dark:text-red-400' : 'text-[var(--muted)]'}`}>
+                  Max 10MB per file. Attachments must finish uploading before you can submit.
+                </p>
 
                 {/* Attached Files List */}
                 {attachmentsList.length > 0 && (
@@ -407,7 +457,7 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
                 <button
                   className="primary-action disabled:opacity-50 disabled:cursor-not-allowed"
                   type="submit"
-                  disabled={isSubmitting || !!ticketId}
+                  disabled={isSubmitting || isUploading || !!ticketId}
                 >
                   {isSubmitting ? (
                     <>

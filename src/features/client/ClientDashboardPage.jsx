@@ -17,14 +17,16 @@ import {
   Menu,
   X,
   Bell,
+  MapPin,
 } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { fetchClientTickets, logoutClient, subscribeToAllTickets, subscribeToGlobalReplies, getUnreadNotificationCount } from '../../lib/ticketService'
+import { fetchClientTickets, logoutClient, subscribeToAllTickets, subscribeToGlobalReplies, getUnreadNotificationCount, resolveClientUrgencyDisplay } from '../../lib/ticketService'
 import { ClientAccountSettings } from '../auth/components/ClientAccountSettings'
 import { parseAttachments } from '../../lib/attachmentUtils'
 import { TicketModal } from '../inquiries/components/TicketModal'
 import { FloatingThemeToggle } from '../../shared/components/FloatingThemeToggle'
 import { IsolatedTicketModal } from './components/IsolatedTicketModal'
+import { UrgencyBadge } from '../../shared/components/UrgencyBadge'
 import { NotificationToastContainer } from '../../shared/components/NotificationToastContainer'
 import { NotificationActivityDrawer } from '../../shared/components/NotificationActivityDrawer'
 
@@ -44,7 +46,7 @@ function ticketMatchesId(ticket, id) {
   )
 }
 
-export function ClientDashboardPage({ clientAccount, onLogout, onUpdateAccount }) {
+export function ClientDashboardPage({ clientAccount, isGoogleUser, onLogout, onUpdateAccount }) {
   const [tickets, setTickets] = useState([])
   const [loading, setLoading] = useState(true)
   // Durable open-state ID — never cleared by remote updates, only by explicit close
@@ -57,7 +59,15 @@ export function ClientDashboardPage({ clientAccount, onLogout, onUpdateAccount }
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [unreadCount, setUnreadCount] = useState(0)
   const [isNotificationDrawerOpen, setIsNotificationDrawerOpen] = useState(false)
+  const [siteNudgeDismissed, setSiteNudgeDismissed] = useState(false)
   const refreshTimerRef = useRef(null)
+
+  const needsSiteAddress = !(clientAccount?.siteAddress || '').trim()
+  const showSiteAddressNudge = needsSiteAddress && !siteNudgeDismissed && activeTab !== 'settings'
+
+  useEffect(() => {
+    setSiteNudgeDismissed(false)
+  }, [clientAccount?.email])
 
   const refreshUnreadCount = useCallback(() => {
     setUnreadCount(getUnreadNotificationCount())
@@ -139,6 +149,15 @@ export function ClientDashboardPage({ clientAccount, onLogout, onUpdateAccount }
 
     const mergeOpenTicketFromPayload = (payload) => {
       if (!payload?.ticketId) return
+      if (payload.priority) {
+        setTickets((prev) =>
+          prev.map((ticket) =>
+            ticketMatchesId(ticket, payload.ticketId)
+              ? { ...ticket, priority: payload.priority }
+              : ticket
+          )
+        )
+      }
       setIsolatedTicketSnapshot((prev) => {
         if (!prev) return prev
         if (
@@ -150,6 +169,7 @@ export function ClientDashboardPage({ clientAccount, onLogout, onUpdateAccount }
         }
         return {
           ...prev,
+          ...(payload.priority ? { priority: payload.priority } : {}),
           ...(payload.status ? { status: payload.status } : {}),
           ...(payload.assignedTo !== undefined
             ? { assignedTo: payload.assignedTo, assigned_to: payload.assignedTo }
@@ -274,15 +294,6 @@ export function ClientDashboardPage({ clientAccount, onLogout, onUpdateAccount }
       default:
         return 'bg-slate-100 text-slate-900 border-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:border-slate-700'
     }
-  }
-
-  // Helper for Priority Badge styling
-  const getPriorityBadgeClass = (priority) => {
-    const prio = priority || 'Medium'
-    if (prio === 'High' || prio === 'Urgent') {
-      return 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/60 dark:text-red-300 dark:border-red-800'
-    }
-    return 'bg-slate-100 text-slate-800 border-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700'
   }
 
   const navItems = [
@@ -440,6 +451,48 @@ export function ClientDashboardPage({ clientAccount, onLogout, onUpdateAccount }
 
         {/* Page Tab Area */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 pb-24">
+          <div className="h-full max-w-7xl mx-auto space-y-4">
+            <AnimatePresence>
+              {showSiteAddressNudge && (
+                <motion.div
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  className="flex flex-wrap items-start justify-between gap-3 rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/60 p-4 text-amber-900 dark:text-amber-200 shadow-xs"
+                  role="status"
+                >
+                  <div className="flex items-start gap-3 min-w-0 flex-1">
+                    <span className="grid size-9 place-items-center rounded-xl bg-amber-100 dark:bg-amber-900/50 border border-amber-200 dark:border-amber-800 shrink-0">
+                      <MapPin size={16} aria-hidden="true" />
+                    </span>
+                    <div className="min-w-0 space-y-1">
+                      <p className="text-sm font-black tracking-tight">Add your site / installation address</p>
+                      <p className="text-xs font-medium leading-relaxed text-amber-800 dark:text-amber-300">
+                        Tickets need a site location for dispatch. Save it once in My Account and we will prefill it on new requests.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('settings')}
+                      className="rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white px-3.5 py-2 text-[11px] font-black uppercase tracking-wider text-white dark:text-slate-900 transition-all cursor-pointer"
+                    >
+                      Add Address
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSiteNudgeDismissed(true)}
+                      className="rounded-lg p-2 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors cursor-pointer"
+                      aria-label="Dismiss site address reminder"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
           <AnimatePresence mode="wait">
             <motion.div
               key={activeTab}
@@ -447,12 +500,13 @@ export function ClientDashboardPage({ clientAccount, onLogout, onUpdateAccount }
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.15 }}
-              className="h-full max-w-7xl mx-auto"
+              className="h-full"
             >
               {activeTab === 'settings' ? (
                 <div className="p-6 rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xs">
                   <ClientAccountSettings
                     clientAccount={clientAccount}
+                    isGoogleUser={isGoogleUser}
                     onAccountUpdated={(updated) => {
                       if (onUpdateAccount) onUpdateAccount(updated)
                     }}
@@ -674,6 +728,7 @@ export function ClientDashboardPage({ clientAccount, onLogout, onUpdateAccount }
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5">
                         {filteredTickets.map((t) => {
                           const attachments = parseAttachments(t.attachment)
+                          const reportedUrgency = resolveClientUrgencyDisplay(t)
                           return (
                             <div
                               key={t.id}
@@ -694,9 +749,11 @@ export function ClientDashboardPage({ clientAccount, onLogout, onUpdateAccount }
                                     {t.ticketNumber}
                                   </span>
                                   <div className="flex items-center gap-1.5">
-                                    <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black border ${getPriorityBadgeClass(t.priority)}`}>
-                                      {t.priority || 'Medium'}
-                                    </span>
+                                    <UrgencyBadge
+                                      urgency={reportedUrgency}
+                                      className="rounded-full text-[10px] font-black"
+                                      showSuffix={false}
+                                    />
                                     <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black border ${getStatusBadgeClass(t.status)}`}>
                                       ● {t.status}
                                     </span>
@@ -737,6 +794,7 @@ export function ClientDashboardPage({ clientAccount, onLogout, onUpdateAccount }
               )}
             </motion.div>
           </AnimatePresence>
+          </div>
         </div>
       </main>
 

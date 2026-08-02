@@ -113,3 +113,10 @@ EXCEPTION WHEN OTHERS THEN
   -- Ignores if tables are already in publication
   NULL;
 END $$;
+
+-- ==============================================================================
+-- Gmail send-as / Reply-To preference columns (migration: add_gmail_settings)
+-- ==============================================================================
+ALTER TABLE public.clients
+  ADD COLUMN IF NOT EXISTS gmail_send_enabled  BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS gmail_reply_to       TEXT;

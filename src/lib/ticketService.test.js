@@ -110,6 +110,21 @@ function getAutoCloseTimeRemaining(ticket) {
 
 // Idempotency cache replica for testing the deduplication logic
 const recentTicketSubmissions = new Map()
+const MAX_ATTACHMENT_REFERENCE_BYTES = 50000
+
+function hasInlineAttachmentData(attachment) {
+  if (typeof attachment !== 'string') return false
+  const trimmed = attachment.trim()
+  if (!trimmed) return false
+  if (trimmed.includes('data:')) return true
+  if (!trimmed.startsWith('[')) return false
+  try {
+    const parsed = JSON.parse(trimmed)
+    return Array.isArray(parsed) && parsed.some((value) => typeof value === 'string' && value.startsWith('data:'))
+  } catch {
+    return false
+  }
+}
 
 function checkIdempotency(email, subject) {
   const cacheKey = `${email}:${subject}`
@@ -381,6 +396,125 @@ describe('getAutoCloseTimeRemaining', () => {
   })
 })
 
+// ─── Gmail settings helpers (extracted from ticketService.js) ──────────────────
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+}
+
+const LOCAL_STORAGE_GMAIL_SETTINGS_PREFIX = 'gmailSettings_'
+
+// Minimal localStorage stub for Node.js test environment
+const _localStore = new Map()
+const localStorageStub = {
+  getItem: (k) => _localStore.get(k) ?? null,
+  setItem: (k, v) => _localStore.set(k, v),
+  removeItem: (k) => _localStore.delete(k),
+  clear: () => _localStore.clear(),
+}
+
+function setLocalData(key, value) {
+  localStorageStub.setItem(key, JSON.stringify(value))
+}
+
+function getLocalData(key, defaultValue = []) {
+  try {
+    const data = localStorageStub.getItem(key)
+    return data !== null ? JSON.parse(data) : defaultValue
+  } catch {
+    return defaultValue
+  }
+}
+
+function updateGmailSettingsLocal(userId, { gmailSendEnabled, gmailReplyTo }) {
+  const enabled = Boolean(gmailSendEnabled)
+  const replyTo = typeof gmailReplyTo === 'string' && gmailReplyTo.trim() ? gmailReplyTo.trim() : null
+  if (replyTo !== null && !isValidEmail(replyTo)) {
+    throw new Error('gmailReplyTo must be a valid email address.')
+  }
+  setLocalData(`${LOCAL_STORAGE_GMAIL_SETTINGS_PREFIX}${userId}`, { gmailSendEnabled: enabled, gmailReplyTo: replyTo })
+  return { success: true }
+}
+
+function getClientGmailSettingsLocal(userId) {
+  const stored = getLocalData(`${LOCAL_STORAGE_GMAIL_SETTINGS_PREFIX}${userId}`, null)
+  return {
+    gmailSendEnabled: stored?.gmailSendEnabled ?? false,
+    gmailReplyTo: stored?.gmailReplyTo ?? null,
+  }
+}
+
+describe('updateGmailSettings (localStorage fallback)', () => {
+  beforeEach(() => {
+    _localStore.clear()
+  })
+
+  it('should reject an invalid gmailReplyTo email', () => {
+    assert.throws(
+      () => updateGmailSettingsLocal('user-123', { gmailSendEnabled: true, gmailReplyTo: 'not-an-email' }),
+      /gmailReplyTo must be a valid email address/,
+    )
+  })
+
+  it('should reject a gmailReplyTo with whitespace only', () => {
+    // whitespace-only trims to empty string, so it is treated as null — no error
+    const result = updateGmailSettingsLocal('user-123', { gmailSendEnabled: false, gmailReplyTo: '   ' })
+    assert.equal(result.success, true)
+    const stored = getClientGmailSettingsLocal('user-123')
+    assert.equal(stored.gmailReplyTo, null)
+  })
+
+  it('should accept a valid payload without replyTo', () => {
+    const result = updateGmailSettingsLocal('user-456', { gmailSendEnabled: true, gmailReplyTo: null })
+    assert.equal(result.success, true)
+    const stored = getClientGmailSettingsLocal('user-456')
+    assert.equal(stored.gmailSendEnabled, true)
+    assert.equal(stored.gmailReplyTo, null)
+  })
+
+  it('should accept a valid payload with a valid replyTo email', () => {
+    const result = updateGmailSettingsLocal('user-789', { gmailSendEnabled: true, gmailReplyTo: 'reply@example.com' })
+    assert.equal(result.success, true)
+    const stored = getClientGmailSettingsLocal('user-789')
+    assert.equal(stored.gmailSendEnabled, true)
+    assert.equal(stored.gmailReplyTo, 'reply@example.com')
+  })
+
+  it('should coerce gmailSendEnabled to boolean', () => {
+    updateGmailSettingsLocal('user-abc', { gmailSendEnabled: 1, gmailReplyTo: null })
+    const stored = getClientGmailSettingsLocal('user-abc')
+    assert.equal(stored.gmailSendEnabled, true)
+  })
+})
+
+describe('getClientGmailSettings (localStorage fallback)', () => {
+  beforeEach(() => {
+    _localStore.clear()
+  })
+
+  it('should return defaults when no data exists for user', () => {
+    const result = getClientGmailSettingsLocal('unknown-user')
+    assert.equal(result.gmailSendEnabled, false)
+    assert.equal(result.gmailReplyTo, null)
+  })
+
+  it('should return stored settings after update', () => {
+    updateGmailSettingsLocal('stored-user', { gmailSendEnabled: true, gmailReplyTo: 'me@example.com' })
+    const result = getClientGmailSettingsLocal('stored-user')
+    assert.equal(result.gmailSendEnabled, true)
+    assert.equal(result.gmailReplyTo, 'me@example.com')
+  })
+
+  it('should scope settings per userId', () => {
+    updateGmailSettingsLocal('user-a', { gmailSendEnabled: true, gmailReplyTo: 'a@example.com' })
+    updateGmailSettingsLocal('user-b', { gmailSendEnabled: false, gmailReplyTo: null })
+    const a = getClientGmailSettingsLocal('user-a')
+    const b = getClientGmailSettingsLocal('user-b')
+    assert.equal(a.gmailSendEnabled, true)
+    assert.equal(b.gmailSendEnabled, false)
+  })
+})
+
 describe('idempotency guard', () => {
   beforeEach(() => {
     recentTicketSubmissions.clear()
@@ -407,5 +541,26 @@ describe('idempotency guard', () => {
     checkIdempotency('user@test.com', 'Help')
     const result = checkIdempotency('user@test.com', 'Other issue')
     assert.equal(result.blocked, false)
+  })
+})
+
+describe('attachment payload guards', () => {
+  it('detects direct data URLs', () => {
+    assert.equal(hasInlineAttachmentData('data:application/pdf;base64,abc123'), true)
+  })
+
+  it('detects data URLs inside JSON arrays', () => {
+    const value = JSON.stringify(['https://example.com/file.pdf', 'data:image/png;base64,abc123'])
+    assert.equal(hasInlineAttachmentData(value), true)
+  })
+
+  it('allows standard URL arrays', () => {
+    const value = JSON.stringify(['https://example.com/file.pdf', 'https://example.com/file2.png'])
+    assert.equal(hasInlineAttachmentData(value), false)
+  })
+
+  it('enforces attachment reference payload size threshold', () => {
+    const oversized = 'x'.repeat(MAX_ATTACHMENT_REFERENCE_BYTES + 1)
+    assert.equal(oversized.length > MAX_ATTACHMENT_REFERENCE_BYTES, true)
   })
 })

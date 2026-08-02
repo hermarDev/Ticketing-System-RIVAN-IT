@@ -260,18 +260,35 @@ export function TicketChatThread({
     let unsubscribe = () => {}
     let pollInterval = null
 
+    const isCounterpartyRole = (role) => {
+      if (!role) return false
+      const selfIsClient = senderRole === 'client'
+      const otherIsClient = role === 'client'
+      return selfIsClient !== otherIsClient
+    }
+
+    const markCounterpartyPresent = (name, role, timestamp = Date.now()) => {
+      if (!isCounterpartyRole(role)) return
+      setCounterpartyPresence({
+        senderName: name,
+        senderRole: role,
+        lastSeen: timestamp,
+      })
+    }
+
     const handlePresenceEvent = (payload) => {
-      if (!payload || payload.ticketId !== ticketId || payload.senderRole === senderRole) return
+      if (!payload || payload.ticketId !== ticketId || !isCounterpartyRole(payload.senderRole)) return
       if (payload.isPresent) {
-        setCounterpartyPresence({ senderName: payload.senderName, senderRole: payload.senderRole, lastSeen: payload.timestamp || Date.now() })
+        markCounterpartyPresent(payload.senderName, payload.senderRole, payload.timestamp || Date.now())
       } else {
         setCounterpartyPresence(null)
       }
     }
 
     const handleTypingEvent = (payload) => {
-      if (!payload || payload.ticketId !== ticketId || payload.senderRole === senderRole) return
+      if (!payload || payload.ticketId !== ticketId || !isCounterpartyRole(payload.senderRole)) return
       if (payload.isTyping) {
+        markCounterpartyPresent(payload.senderName, payload.senderRole)
         setTypingUser({ senderName: payload.senderName, senderRole: payload.senderRole })
         if (typingExpireRef.current) clearTimeout(typingExpireRef.current)
         typingExpireRef.current = setTimeout(() => setTypingUser(null), 3000)
@@ -293,7 +310,7 @@ export function TicketChatThread({
     }
 
     const notifyIncoming = (incomingMsg) => {
-      if (incomingMsg.senderRole !== senderRole) {
+      if (isCounterpartyRole(incomingMsg.senderRole)) {
         dispatchNotification({ title: `New message from ${incomingMsg.senderName || 'Support'}`, message: incomingMsg.message, type: 'chat', ticketId })
       }
     }
@@ -314,6 +331,7 @@ export function TicketChatThread({
           chatChannel.onmessage = (event) => {
             if (event.data?.type === 'NEW_REPLY' && event.data?.message?.ticketId === ticketId) {
               const incoming = event.data.message
+              markCounterpartyPresent(incoming.senderName, incoming.senderRole)
               setMessages((prev) => {
                 if (prev.some((m) => m.id === incoming.id)) return prev
                 return [...prev.filter((m) => !m.isPending), incoming]
@@ -328,6 +346,7 @@ export function TicketChatThread({
       } catch (err) { console.warn('BroadcastChannel error:', err) }
 
       unsubscribe = subscribeToTicketReplies(ticketId, (newMsg) => {
+        markCounterpartyPresent(newMsg.senderName, newMsg.senderRole)
         setMessages((prev) => {
           if (prev.some((m) => m.id === newMsg.id)) return prev
           return [...prev.filter((m) => !m.isPending), newMsg]
@@ -339,6 +358,7 @@ export function TicketChatThread({
 
       const handleLocalReply = (e) => {
         if (e.detail?.ticketId === ticketId) {
+          markCounterpartyPresent(e.detail.senderName, e.detail.senderRole)
           setMessages((prev) => {
             if (prev.some((m) => m.id === e.detail.id)) return prev
             return [...prev.filter((m) => !m.isPending), e.detail]
@@ -348,9 +368,15 @@ export function TicketChatThread({
           setTimeout(() => scrollToBottom('smooth'), 50)
         }
       }
+      const handleLocalTyping = (e) => {
+        if (e.detail) handleTypingEvent(e.detail)
+      }
+      const handleLocalPresence = (e) => {
+        if (e.detail) handlePresenceEvent(e.detail)
+      }
       window.addEventListener('netops_reply_added', handleLocalReply)
-      window.addEventListener('netops_user_typing', (e) => e.detail && handleTypingEvent(e.detail))
-      window.addEventListener('netops_presence_heartbeat', (e) => e.detail && handlePresenceEvent(e.detail))
+      window.addEventListener('netops_user_typing', handleLocalTyping)
+      window.addEventListener('netops_presence_heartbeat', handleLocalPresence)
 
       pollInterval = setInterval(() => loadFreshMessages(false), 3000)
 
@@ -358,6 +384,8 @@ export function TicketChatThread({
         clearInterval(heartbeatInterval)
         clearInterval(presenceCheckInterval)
         window.removeEventListener('netops_reply_added', handleLocalReply)
+        window.removeEventListener('netops_user_typing', handleLocalTyping)
+        window.removeEventListener('netops_presence_heartbeat', handleLocalPresence)
         emitPresence(false)
         if (chatChannel) chatChannel.close()
       }
@@ -422,9 +450,9 @@ export function TicketChatThread({
   }
 
   const roleBadges = {
-    client: { label: 'Client', icon: User, style: 'bg-slate-100 text-slate-900 border-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:border-slate-700' },
-    staff: { label: 'Support Engineer', icon: Headphones, style: 'bg-slate-100 text-slate-900 border-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:border-slate-700' },
-    admin: { label: 'Administrator', icon: ShieldCheck, style: 'bg-slate-100 text-slate-900 border-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:border-slate-700' },
+    client: { label: 'Client', icon: User, style: 'bg-slate-100 text-slate-800 border-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700' },
+    staff: { label: 'Support Engineer', icon: Headphones, style: 'bg-blue-50 text-blue-800 border-blue-200 dark:bg-blue-950/80 dark:text-blue-200 dark:border-blue-800/80' },
+    admin: { label: 'Administrator', icon: ShieldCheck, style: 'bg-indigo-50 text-indigo-800 border-indigo-200 dark:bg-indigo-950/80 dark:text-indigo-200 dark:border-indigo-800/80' },
   }
 
   const isCounterpartyOnline = Boolean(
@@ -486,7 +514,7 @@ export function TicketChatThread({
   }
 
   return (
-    <div onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop} className="relative flex flex-col h-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-xs">
+    <div onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop} className="relative flex flex-col h-full min-h-0 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-xs">
       <input type="file" ref={fileInputRef} accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.rar,.7z,.log,.json" onChange={handleFileSelect} className="hidden" />
 
       <AnimatePresence>
@@ -499,24 +527,25 @@ export function TicketChatThread({
         )}
       </AnimatePresence>
 
-      <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/40 flex items-center justify-between gap-2">
+      <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/40 flex items-center justify-between gap-2 shrink-0">
         <div className="flex items-center gap-2 text-xs font-bold text-slate-950 dark:text-white uppercase tracking-wider">
           <MessageSquare size={15} />
           <span>Live Inquiry Discussion</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-extrabold border transition-all ${isCounterpartyOnline ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30' : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-700'}`}>
-            <span className={`size-2 rounded-full ${isCounterpartyOnline ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
+          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-extrabold border transition-all ${isCounterpartyOnline ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 dark:bg-emerald-500/20 dark:border-emerald-500/40' : 'bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700'}`}>
+            <span className={`size-2 rounded-full ${isCounterpartyOnline ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400 dark:bg-slate-500'}`} />
             <span>{isCounterpartyOnline ? `${counterpartyPresence.senderName || counterpartyLabel} is in chat` : `${counterpartyLabel} is offline`}</span>
           </div>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div className="flex-1 overflow-y-auto min-h-0 p-4 space-y-3">
         {loading ? (
           <div className="flex justify-center py-12"><Loader2 size={24} className="animate-spin text-slate-900 dark:text-slate-100" /></div>
         ) : messages.map((m) => {
-          const isCurrentSender = m.senderRole === senderRole
+          const isSelf = senderRole === 'client' ? m.senderRole === 'client' : m.senderRole !== 'client'
+          const isCurrentSender = m.senderRole === senderRole || isSelf
           const badge = roleBadges[m.senderRole] || roleBadges.client
           const BadgeIcon = badge.icon
           const attachMeta = parseAttachmentMeta(m)
@@ -530,7 +559,11 @@ export function TicketChatThread({
                 </span>
                 <span className="text-[10px] text-slate-500 font-medium">{formatTime(m.createdAt || m.created_at)}</span>
               </div>
-              <div className={`max-w-[85%] rounded-2xl p-3.5 text-xs ${isCurrentSender ? 'bg-slate-900 text-white rounded-tr-none' : 'bg-slate-100 text-slate-900 rounded-tl-none'}`}>
+              <div className={`max-w-[85%] rounded-2xl p-3.5 text-xs shadow-xs border transition-colors ${
+                isCurrentSender
+                  ? 'bg-slate-900 text-white dark:bg-indigo-600 dark:text-white border-slate-900 dark:border-indigo-500/40 rounded-tr-none'
+                  : 'bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-slate-100 border-slate-200/80 dark:border-slate-700/80 rounded-tl-none'
+              }`}>
                 {m.message && <div className="whitespace-pre-wrap leading-relaxed">{m.message}</div>}
                 {attachMeta && attachMeta.url && (
                   <div className="mt-2.5 pt-2 border-t border-slate-700/30">
@@ -615,7 +648,7 @@ export function TicketChatThread({
 
       <AnimatePresence>
         {attachment && (
-          <motion.div className="px-3 py-2 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 flex items-center gap-3">
+          <motion.div className="px-3 py-2 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 flex items-center gap-3 shrink-0">
             <div className="size-12 rounded-xl bg-black/5 flex items-center justify-center">
               {attachment.isImage ? <img src={attachment.url} className="w-full h-full object-cover rounded-xl" /> : <File size={22} />}
             </div>
@@ -628,7 +661,7 @@ export function TicketChatThread({
         )}
       </AnimatePresence>
 
-      <form onSubmit={handleSend} className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/50 flex items-end gap-2">
+      <form onSubmit={handleSend} className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/50 flex items-end gap-2 shrink-0">
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}

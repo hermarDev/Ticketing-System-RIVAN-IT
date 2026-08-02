@@ -20,8 +20,9 @@ import {
   MapPin,
 } from 'lucide-react'
 import { TicketChatThread } from '../../../shared/components/TicketChatThread'
+import { UrgencyBadge } from '../../../shared/components/UrgencyBadge'
 import { openAttachment, isImageUrl, getAttachmentLabel, parseAttachments } from '../../../lib/attachmentUtils'
-import { approveAndCloseTicket, reopenTicket, getAutoCloseTimeRemaining, setActiveTicketId } from '../../../lib/ticketService'
+import { approveAndCloseTicket, reopenTicket, getAutoCloseTimeRemaining, setActiveTicketId, resolveClientUrgencyDisplay } from '../../../lib/ticketService'
 import { parseSiteFromTicketDescription, buildGoogleMapsUrl } from '../../../lib/locationService'
 
 export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, onTicketUpdated }) {
@@ -139,20 +140,6 @@ export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, on
     }
   }
 
-  // Helper for Priority Badge
-  const getPriorityBadge = (priority) => {
-    const prio = priority || 'Medium'
-    let colorClass = 'bg-slate-100 text-slate-900 border border-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:border-slate-700'
-    if (prio === 'High' || prio === 'Urgent') {
-      colorClass = 'bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-800'
-    }
-    return (
-      <span className={`px-2.5 py-0.5 rounded-md text-[11px] font-bold border ${colorClass}`}>
-        {prio} Priority
-      </span>
-    )
-  }
-
   // Calculate progress step index (1–4). Current step is active, not completed.
   const getTimelineStep = () => {
     if (ticket?.status === 'Resolved' || ticket?.status === 'Closed') return 4
@@ -179,7 +166,7 @@ export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, on
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 15 }}
             transition={{ duration: 0.2, ease: 'easeOut' }}
-            className="relative w-full h-full max-w-full sm:max-w-4xl bg-white dark:bg-slate-900 sm:border border-slate-200 dark:border-slate-800 sm:rounded-3xl sm:shadow-2xl flex flex-col sm:h-auto sm:max-h-[90vh] sm:my-auto text-slate-950 dark:text-white"
+            className="relative w-full h-full max-w-full sm:max-w-4xl bg-white dark:bg-slate-900 sm:border border-slate-200 dark:border-slate-800 sm:rounded-3xl sm:shadow-2xl flex flex-col h-full sm:h-[90vh] sm:max-h-[90vh] sm:my-auto text-slate-950 dark:text-white overflow-hidden"
           >
           {/* Top Modal Header */}
           <div className="px-3.5 sm:px-7 py-3 sm:py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/70 backdrop-blur-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 shrink-0">
@@ -216,7 +203,7 @@ export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, on
                     >
                       {copied ? <Check size={13} className="text-emerald-600 dark:text-emerald-400" /> : <Copy size={13} />}
                     </button>
-                    {getPriorityBadge(ticket.priority)}
+                    <UrgencyBadge urgency={resolveClientUrgencyDisplay(ticket)} />
                   </div>
                 </div>
 
@@ -282,8 +269,12 @@ export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, on
             </div>
           </div>
 
-          {/* Modal Main Content Container */}
-          <div className="flex-1 overflow-y-auto p-3 sm:p-7 pb-20 sm:pb-7 space-y-4">
+          {/* Main Content Area */}
+          <div className={`flex-1 min-h-0 p-3 sm:p-7 ${
+            activeTab === 'chat'
+              ? 'overflow-hidden flex flex-col gap-4'
+              : 'overflow-y-auto space-y-4'
+          }`}>
             {/* Resolution Approval Banner (when ticket status is Resolved) */}
             {ticket.status === 'Resolved' && (
               <div className="p-4 sm:p-5 rounded-2xl border border-emerald-500/30 bg-gradient-to-r from-emerald-500/10 via-emerald-500/5 to-transparent shadow-xs space-y-3">
@@ -343,8 +334,8 @@ export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, on
             )}
 
             {activeTab === 'chat' && (
-              <div className="h-full min-h-[440px] flex flex-col">
-                <div className="mb-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-xs text-slate-700 dark:text-slate-300 flex items-center justify-between">
+              <div className="flex flex-col flex-1 min-h-0 h-full">
+                <div className="mb-3 shrink-0 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-xs text-slate-700 dark:text-slate-300 flex items-center justify-between">
                   <span className="font-semibold">
                     Direct line with Network & Tech Engineers for ticket{' '}
                     <strong className="text-slate-950 dark:text-white">{ticket.ticketNumber}</strong>
@@ -353,7 +344,7 @@ export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, on
                     SLA Response &lt; 15 mins
                   </span>
                 </div>
-                <div className="flex-1 min-h-[380px]">
+                <div className="flex-1 flex flex-col min-h-0 h-full">
                   <TicketChatThread
                     ticketId={ticket.id}
                     senderName={clientAccount?.fullName || ticket.clientName || 'Client'}
@@ -400,7 +391,7 @@ export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, on
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-1">
                     <span className="text-[11px] font-bold text-slate-700 dark:text-slate-400 uppercase flex items-center gap-1">
-                      <Building size={13} /> Department
+                      <Building size={13} /> Request Type
                     </span>
                     <span className="text-sm font-black text-slate-950 dark:text-white block">{ticket.category || 'General Support'}</span>
                   </div>

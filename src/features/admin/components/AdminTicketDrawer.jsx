@@ -20,9 +20,19 @@ import {
   MapPin,
 } from 'lucide-react'
 import { TicketChatThread } from '../../../shared/components/TicketChatThread'
+import { UrgencyBadge } from '../../../shared/components/UrgencyBadge'
 import { openAttachment, isImageUrl, getAttachmentLabel, parseAttachments } from '../../../lib/attachmentUtils'
-import { updateTicketStatus, assignTicketStaff, setActiveTicketId } from '../../../lib/ticketService'
+import {
+  updateTicketStatus,
+  updateTicketPriority,
+  assignTicketStaff,
+  setActiveTicketId,
+  resolveClientUrgencyDisplay,
+} from '../../../lib/ticketService'
+import { priorities } from '../../../config/serviceOptions'
 import { parseSiteFromTicketDescription, buildGoogleMapsUrl } from '../../../lib/locationService'
+
+const PRIORITY_OPTIONS = priorities
 
 export function AdminTicketDrawer({
   ticket,
@@ -36,10 +46,13 @@ export function AdminTicketDrawer({
   const [copied, setCopied] = useState(false)
   const [updatingStatus, setUpdatingStatus] = useState(false)
   const [selectedStatus, setSelectedStatus] = useState(ticket?.status === 'Open' ? 'New' : (ticket?.status || 'New'))
+  const [selectedPriority, setSelectedPriority] = useState(ticket?.priority || 'Medium')
   const [assignedStaff, setAssignedStaff] = useState(ticket?.assignedTo || ticket?.assigned_to || '')
   const [assignedStaffId, setAssignedStaffId] = useState(ticket?.assignedToId || null)
   const [assignError, setAssignError] = useState('')
+  const [priorityError, setPriorityError] = useState('')
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false)
+  const [isPriorityMenuOpen, setIsPriorityMenuOpen] = useState(false)
   const [isStaffMenuOpen, setIsStaffMenuOpen] = useState(false)
   const ticketId = ticket?.id || ticket?.ticketNumber || ticket?.ticket_number || null
 
@@ -47,9 +60,11 @@ export function AdminTicketDrawer({
     if (ticket) {
       const raw = ticket.status || 'New'
       setSelectedStatus(raw === 'Open' ? 'New' : raw)
+      setSelectedPriority(ticket.priority || 'Medium')
       setAssignedStaff(ticket.assignedTo || ticket.assigned_to || '')
       setAssignedStaffId(ticket.assignedToId || null)
       setAssignError('')
+      setPriorityError('')
     }
   }, [ticket])
 
@@ -60,6 +75,10 @@ export function AdminTicketDrawer({
         setIsStatusMenuOpen(false)
         return
       }
+      if (isPriorityMenuOpen) {
+        setIsPriorityMenuOpen(false)
+        return
+      }
       if (isStaffMenuOpen) {
         setIsStaffMenuOpen(false)
         return
@@ -68,7 +87,7 @@ export function AdminTicketDrawer({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isOpen, onClose, isStatusMenuOpen, isStaffMenuOpen])
+  }, [isOpen, onClose, isStatusMenuOpen, isPriorityMenuOpen, isStaffMenuOpen])
 
   useEffect(() => {
     if (isOpen && ticketId) {
@@ -104,6 +123,26 @@ export function AdminTicketDrawer({
       if (onTicketUpdated) onTicketUpdated()
     } catch (err) {
       console.error('Failed to update status:', err)
+    } finally {
+      setUpdatingStatus(false)
+    }
+  }
+
+  const staffIdentity = currentUser?.email || currentUser?.fullName || 'Staff'
+
+  const handlePriorityChange = async (newPriority) => {
+    if (!ticket?.id || newPriority === selectedPriority) return
+    const previousPriority = selectedPriority
+    try {
+      setUpdatingStatus(true)
+      setPriorityError('')
+      setSelectedPriority(newPriority)
+      await updateTicketPriority(ticket.id, newPriority, staffIdentity)
+      if (onTicketUpdated) await onTicketUpdated()
+    } catch (err) {
+      console.error('Failed to update priority:', err)
+      setSelectedPriority(previousPriority)
+      setPriorityError(err?.message || 'Failed to update priority. Please try again.')
     } finally {
       setUpdatingStatus(false)
     }
@@ -145,6 +184,30 @@ export function AdminTicketDrawer({
     }
   }
 
+  const hasLocalPriorityOverride = selectedPriority !== (ticket?.priority || 'Medium')
+  const clientUrgencyDisplay = resolveClientUrgencyDisplay(
+    hasLocalPriorityOverride
+      ? {
+          ...ticket,
+          priority: selectedPriority,
+          priorityUpdatedAt: new Date().toISOString(),
+        }
+      : ticket
+  )
+
+  const getPriorityDot = (priority) => {
+    switch (priority) {
+      case 'Urgent':
+      case 'High':
+        return 'bg-rose-500'
+      case 'Medium':
+        return 'bg-amber-500'
+      case 'Low':
+      default:
+        return 'bg-slate-500'
+    }
+  }
+
   // Helper for Status Badge
   const getStatusBadge = (status) => {
     const norm = status === 'Open' ? 'New' : (status || 'New')
@@ -164,8 +227,8 @@ export function AdminTicketDrawer({
         )
       case 'Pending Client':
         return (
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-sky-50 text-sky-800 border border-sky-200 dark:bg-sky-950/60 dark:text-sky-300 dark:border-sky-800">
-            <Clock size={13} /> Pending Client
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800">
+            <Clock size={13} className="animate-spin" /> Pending Client
           </span>
         )
       case 'New':
@@ -192,26 +255,12 @@ export function AdminTicketDrawer({
       case 'In Progress':
         return 'bg-amber-500'
       case 'Pending Client':
-        return 'bg-sky-500'
+        return 'bg-amber-500'
       case 'New':
       case 'Open':
       default:
         return 'bg-slate-500'
     }
-  }
-
-  // Helper for Priority Badge
-  const getPriorityBadge = (priority) => {
-    const prio = priority || 'Medium'
-    let colorClass = 'bg-slate-100 text-slate-900 border-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:border-slate-700'
-    if (prio === 'High' || prio === 'Urgent') {
-      colorClass = 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-800'
-    }
-    return (
-      <span className={`px-2.5 py-0.5 rounded-md text-[11px] font-bold uppercase border ${colorClass}`}>
-        {prio} Priority
-      </span>
-    )
   }
 
   // Calculate progress step index (1–4). Current step is active, not completed.
@@ -241,7 +290,7 @@ export function AdminTicketDrawer({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 15 }}
             transition={{ duration: 0.2, ease: 'easeOut' }}
-            className="relative w-full h-full max-w-full sm:max-w-5xl bg-white dark:bg-slate-900 sm:border border-slate-200 dark:border-slate-800 sm:rounded-3xl sm:shadow-2xl flex flex-col sm:h-auto sm:max-h-[92vh] sm:my-auto text-slate-950 dark:text-white"
+            className="relative w-full h-full max-w-full sm:max-w-5xl bg-white dark:bg-slate-900 sm:border border-slate-200 dark:border-slate-800 sm:rounded-3xl sm:shadow-2xl flex flex-col h-full sm:h-[92vh] sm:max-h-[92vh] sm:my-auto text-slate-950 dark:text-white overflow-hidden"
           >
           {/* Top Admin Header */}
           <div className="px-3 sm:px-7 py-3 sm:py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/80 backdrop-blur-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 shrink-0">
@@ -275,7 +324,7 @@ export function AdminTicketDrawer({
                   >
                     {copied ? <Check size={13} className="text-emerald-600 dark:text-emerald-400" /> : <Copy size={13} />}
                   </button>
-                  {getPriorityBadge(ticket?.priority)}
+                  <UrgencyBadge urgency={clientUrgencyDisplay} />
                 </div>
                 <h2 className="text-base sm:text-lg font-black text-slate-950 dark:text-white line-clamp-1 leading-snug">
                   {ticket?.subject}
@@ -298,29 +347,35 @@ export function AdminTicketDrawer({
 
           {/* Quick Operations Bar (Custom Framer Motion Dropdowns) */}
           <div className="px-3 sm:px-7 py-2 sm:py-2.5 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shrink-0">
-            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:items-center sm:justify-between w-full relative">
-              {(isStatusMenuOpen || isStaffMenuOpen) && (
-                <div 
-                  className="fixed inset-0 z-40" 
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3 w-full relative">
+              {(isStatusMenuOpen || isPriorityMenuOpen || isStaffMenuOpen) && (
+                <div
+                  className="fixed inset-0 z-40"
                   onClick={() => {
                     setIsStatusMenuOpen(false)
+                    setIsPriorityMenuOpen(false)
                     setIsStaffMenuOpen(false)
-                  }} 
+                  }}
                 />
               )}
-              {/* Left Status Dropdown */}
+              {/* Status Dropdown */}
               <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2 z-50">
-                <span className="text-[10px] sm:text-xs font-bold uppercase text-slate-500 dark:text-slate-400 tracking-wider">
+                <span id="admin-drawer-status-label" className="text-[10px] sm:text-xs font-bold uppercase text-slate-500 dark:text-slate-400 tracking-wider">
                   Status:
                 </span>
                 <div className="relative">
                   <button
+                    type="button"
+                    aria-labelledby="admin-drawer-status-label"
+                    aria-haspopup="listbox"
+                    aria-expanded={isStatusMenuOpen}
                     onClick={() => {
                       setIsStaffMenuOpen(false)
+                      setIsPriorityMenuOpen(false)
                       setIsStatusMenuOpen(!isStatusMenuOpen)
                     }}
                     disabled={updatingStatus}
-                    className="flex items-center justify-between w-full sm:w-auto min-w-[160px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 sm:py-1.5 text-xs font-bold text-slate-950 dark:text-white focus:outline-none focus:border-slate-900 dark:focus:border-slate-100 transition-all shadow-inner"
+                    className="flex items-center justify-between w-full min-w-[140px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 sm:py-1.5 text-xs font-bold text-slate-950 dark:text-white focus:outline-none focus:border-slate-900 dark:focus:border-slate-100 transition-all shadow-inner"
                   >
                     <div className="flex items-center gap-2">
                       <span className={`w-2 h-2 rounded-full ${getStatusDot(selectedStatus)}`} />
@@ -328,10 +383,12 @@ export function AdminTicketDrawer({
                     </div>
                     <ChevronDown size={14} className="text-slate-500 ml-2" />
                   </button>
-                  
+
                   <AnimatePresence>
                     {isStatusMenuOpen && (
                       <motion.div
+                        role="listbox"
+                        aria-labelledby="admin-drawer-status-label"
                         initial={{ opacity: 0, y: -5 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -5 }}
@@ -340,6 +397,9 @@ export function AdminTicketDrawer({
                       >
                         {STATUS_OPTIONS.map(st => (
                           <button
+                            type="button"
+                            role="option"
+                            aria-selected={selectedStatus === st}
                             key={st}
                             onClick={() => {
                               handleStatusChange(st)
@@ -364,22 +424,90 @@ export function AdminTicketDrawer({
                 </div>
               </div>
 
-              {/* Right Engineer Assignment Selector */}
+              {/* Priority Dropdown */}
               <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2 z-50">
-                <span className="text-[10px] sm:text-xs font-bold uppercase text-slate-500 dark:text-slate-400 tracking-wider">
+                <span id="admin-drawer-priority-label" className="text-[10px] sm:text-xs font-bold uppercase text-slate-500 dark:text-slate-400 tracking-wider">
+                  Priority:
+                </span>
+                <div className="relative">
+                  <button
+                    type="button"
+                    aria-labelledby="admin-drawer-priority-label"
+                    aria-haspopup="listbox"
+                    aria-expanded={isPriorityMenuOpen}
+                    onClick={() => {
+                      setIsStatusMenuOpen(false)
+                      setIsStaffMenuOpen(false)
+                      setIsPriorityMenuOpen(!isPriorityMenuOpen)
+                    }}
+                    disabled={updatingStatus}
+                    className="flex items-center justify-between w-full min-w-[140px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 sm:py-1.5 text-xs font-bold text-slate-950 dark:text-white focus:outline-none focus:border-slate-900 dark:focus:border-slate-100 transition-all shadow-inner"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${getPriorityDot(selectedPriority)}`} />
+                      {selectedPriority}
+                    </div>
+                    <ChevronDown size={14} className="text-slate-500 ml-2" />
+                  </button>
+
+                  <AnimatePresence>
+                    {isPriorityMenuOpen && (
+                      <motion.div
+                        role="listbox"
+                        aria-labelledby="admin-drawer-priority-label"
+                        initial={{ opacity: 0, y: -5 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -5 }}
+                        transition={{ duration: 0.15 }}
+                        className="absolute top-full left-0 mt-1 w-full min-w-[140px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-xl z-50 p-1.5 space-y-1"
+                      >
+                        {PRIORITY_OPTIONS.map((prio) => (
+                          <button
+                            type="button"
+                            role="option"
+                            aria-selected={selectedPriority === prio}
+                            key={prio}
+                            onClick={() => {
+                              handlePriorityChange(prio)
+                              setIsPriorityMenuOpen(false)
+                            }}
+                            className={`w-full text-left flex items-center justify-between px-2.5 py-2 text-xs font-bold rounded-xl transition-colors ${
+                              selectedPriority === prio
+                                ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white'
+                                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800/50 hover:text-slate-900 dark:hover:text-white'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className={`w-2 h-2 rounded-full ${getPriorityDot(prio)}`} />
+                              {prio}
+                            </div>
+                            {selectedPriority === prio && <Check size={12} className="text-slate-900 dark:text-white" />}
+                          </button>
+                        ))}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              </div>
+
+              {/* Engineer Assignment Selector */}
+              <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-2 z-50">
+                <span id="admin-drawer-staff-label" className="text-[10px] sm:text-xs font-bold uppercase text-slate-500 dark:text-slate-400 tracking-wider">
                   Staff:
                 </span>
                 <div className="relative">
                   <button
                     type="button"
+                    aria-labelledby="admin-drawer-staff-label"
                     onClick={() => {
                       setIsStatusMenuOpen(false)
+                      setIsPriorityMenuOpen(false)
                       setIsStaffMenuOpen(!isStaffMenuOpen)
                     }}
                     disabled={updatingStatus}
                     aria-haspopup="listbox"
                     aria-expanded={isStaffMenuOpen}
-                    className="flex items-center justify-between w-full sm:w-auto min-w-[160px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 sm:py-1.5 text-xs font-bold text-slate-950 dark:text-white focus:outline-none focus:border-slate-900 dark:focus:border-slate-100 transition-all shadow-inner"
+                    className="flex items-center justify-between w-full min-w-[140px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 sm:py-1.5 text-xs font-bold text-slate-950 dark:text-white focus:outline-none focus:border-slate-900 dark:focus:border-slate-100 transition-all shadow-inner"
                   >
                     <div className="flex items-center gap-2 truncate">
                       <User size={14} className="text-slate-500 shrink-0" />
@@ -387,11 +515,12 @@ export function AdminTicketDrawer({
                     </div>
                     <ChevronDown size={14} className="text-slate-500 shrink-0 ml-2" />
                   </button>
-                  
+
                   <AnimatePresence>
                     {isStaffMenuOpen && (
                       <motion.div
                         role="listbox"
+                        aria-labelledby="admin-drawer-staff-label"
                         initial={{ opacity: 0, y: -5 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -5 }}
@@ -415,7 +544,7 @@ export function AdminTicketDrawer({
                           <span className="truncate">Unassigned</span>
                           {isStaffSelected(null) && <Check size={12} className="text-slate-900 dark:text-white shrink-0" />}
                         </button>
-                        
+
                         {(staffMembers.length > 0 ? staffMembers : [{
                             id: currentUser?.id || 'currentUser',
                             full_name: currentUser?.fullName || 'Tier-2 Engineer',
@@ -454,9 +583,9 @@ export function AdminTicketDrawer({
                 </div>
               </div>
             </div>
-            {assignError && (
+            {(assignError || priorityError) && (
               <p className="mt-2 text-[11px] font-semibold text-rose-600 dark:text-rose-400" role="alert">
-                {assignError}
+                {priorityError || assignError}
               </p>
             )}
           </div>
@@ -503,15 +632,19 @@ export function AdminTicketDrawer({
           </div>
 
           {/* Main Content Area */}
-          <div className="flex-1 overflow-y-auto p-3 sm:p-7 pb-20 sm:pb-7">
+          <div className={`flex-1 min-h-0 p-3 sm:p-7 ${
+            activeTab === 'chat'
+              ? 'overflow-hidden flex flex-col'
+              : 'overflow-y-auto'
+          }`}>
             {activeTab === 'chat' && (
-              <div className="h-full min-h-[460px] flex flex-col">
-                <div className="mb-2 p-2 px-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-xs text-slate-600 dark:text-slate-400 flex items-center justify-center text-center">
+              <div className="flex flex-col flex-1 min-h-0 h-full">
+                <div className="mb-2 shrink-0 p-2 px-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-xs text-slate-600 dark:text-slate-400 flex items-center justify-center text-center">
                   <span className="font-semibold">
                     Realtime Support Channel &bull; Client: <strong className="text-slate-900 dark:text-white">{ticket.clientName || ticket.email || 'Client'}</strong>
                   </span>
                 </div>
-                <div className="flex-1 min-h-[400px]">
+                <div className="flex-1 flex flex-col min-h-0 h-full">
                   <TicketChatThread
                     ticketId={ticket.id}
                     senderName={currentUser?.fullName || 'Operations Staff'}
@@ -555,7 +688,7 @@ export function AdminTicketDrawer({
                 )}
 
                 {/* Client & Metadata Properties Grid */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-1">
                     <span className="text-[11px] font-bold text-slate-700 dark:text-slate-400 uppercase flex items-center gap-1">
                       <User size={13} /> Client Name
@@ -566,9 +699,16 @@ export function AdminTicketDrawer({
 
                   <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-1">
                     <span className="text-[11px] font-bold text-slate-700 dark:text-slate-400 uppercase flex items-center gap-1">
-                      <Building size={13} /> Department / Site
+                      <Building size={13} /> Request Type
                     </span>
                     <span className="text-sm font-black text-slate-950 dark:text-white block">{ticket.category || 'General Support'}</span>
+                  </div>
+
+                  <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-1.5">
+                    <span className="text-[11px] font-bold text-slate-700 dark:text-slate-400 uppercase flex items-center gap-1">
+                      <AlertCircle size={13} /> Client Urgency
+                    </span>
+                    <div><UrgencyBadge urgency={clientUrgencyDisplay} /></div>
                   </div>
 
                   <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-1">
