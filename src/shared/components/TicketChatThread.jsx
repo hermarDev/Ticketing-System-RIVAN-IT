@@ -4,7 +4,7 @@ import {
   Send, Loader2, MessageSquare, Headphones, User, ShieldCheck, Paperclip, X, UploadCloud, 
   Download, FileText, FileSpreadsheet, FileArchive, FileCode, File 
 } from 'lucide-react'
-import { fetchTicketReplies, addTicketReply, subscribeToTicketReplies } from '../../lib/ticketService'
+import { fetchTicketReplies, addTicketReply, subscribeToTicketReplies, subscribeToTicketPresence } from '../../lib/ticketService'
 import { dispatchNotification, setActiveTicketId } from '../../lib/notificationService'
 import { isSupabaseConfigured, supabase } from '../../lib/supabaseClient'
 
@@ -38,6 +38,7 @@ export function TicketChatThread({
   const messagesEndRef = useRef(null)
   const typingTimerRef = useRef(null)
   const typingExpireRef = useRef(null)
+  const presenceApiRef = useRef(null)
 
   useEffect(() => {
     if (ticketId) {
@@ -229,6 +230,8 @@ export function TicketChatThread({
       }
     } catch {}
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('netops_presence_heartbeat', { detail: payload }))
+    // Cross-device: refresh the Supabase Realtime presence track
+    presenceApiRef.current?.updatePresence()
   }, [ticketId, senderName, senderRole])
 
   const emitTyping = (isTyping) => {
@@ -242,6 +245,8 @@ export function TicketChatThread({
       }
     } catch {}
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('netops_user_typing', { detail: payload }))
+    // Cross-device: broadcast typing over Supabase Realtime
+    presenceApiRef.current?.sendTyping(isTyping)
   }
 
   const handleInputChange = (val) => {
@@ -378,6 +383,35 @@ export function TicketChatThread({
       window.addEventListener('netops_user_typing', handleLocalTyping)
       window.addEventListener('netops_presence_heartbeat', handleLocalPresence)
 
+      // Cross-device presence + typing via Supabase Realtime
+      const presenceApi = subscribeToTicketPresence(
+        ticketId,
+        { senderName, senderRole },
+        {
+          onPresence: (counterparties) => {
+            if (counterparties.length > 0) {
+              const cp = counterparties[counterparties.length - 1]
+              markCounterpartyPresent(cp.senderName, cp.senderRole)
+            } else {
+              setCounterpartyPresence(null)
+            }
+          },
+          onTyping: (payload) => {
+            if (payload.isTyping) {
+              markCounterpartyPresent(payload.senderName, payload.senderRole)
+              setTypingUser({ senderName: payload.senderName, senderRole: payload.senderRole })
+              if (typingExpireRef.current) clearTimeout(typingExpireRef.current)
+              typingExpireRef.current = setTimeout(() => setTypingUser(null), 3000)
+            } else {
+              if (typingExpireRef.current) clearTimeout(typingExpireRef.current)
+              setTypingUser(null)
+            }
+          },
+        },
+      )
+      presenceApiRef.current = presenceApi
+      presenceApi.updatePresence()
+
       pollInterval = setInterval(() => loadFreshMessages(false), 3000)
 
       return () => {
@@ -388,6 +422,8 @@ export function TicketChatThread({
         window.removeEventListener('netops_presence_heartbeat', handleLocalPresence)
         emitPresence(false)
         if (chatChannel) chatChannel.close()
+        presenceApiRef.current = null
+        presenceApi.unsubscribe()
       }
     }
 
@@ -400,7 +436,7 @@ export function TicketChatThread({
       emitPresence(false)
       cleanup.then((fn) => fn && fn())
     }
-  }, [ticketId, senderRole, emitPresence])
+  }, [ticketId, senderRole, senderName, emitPresence])
 
   const handleSend = async (e) => {
     if (e) e.preventDefault()

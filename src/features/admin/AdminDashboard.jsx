@@ -37,6 +37,7 @@ import { priorities } from '../../config/serviceOptions'
 import { supabase, isSupabaseConfigured } from '../../lib/supabaseClient'
 import { validateRequiredFields, isValidEmail, getPasswordValidationError, mapAuthPasswordError } from '../../lib/formValidation'
 import { PasswordRequirementsChecklist } from '../../shared/components/PasswordRequirementsChecklist'
+import { SelectDropdown } from '../../shared/components/SelectDropdown'
 import { logger } from '../../lib/logger'
 import { TicketChatThread } from '../../shared/components/TicketChatThread'
 import { FloatingThemeToggle } from '../../shared/components/FloatingThemeToggle'
@@ -325,15 +326,17 @@ function CreateStaffModal({ onClose, onSuccess }) {
 
           <div>
             <label className="block text-xs font-bold uppercase text-[var(--muted)] mb-1.5">Role</label>
-            <select
+            <SelectDropdown
               value={form.role}
-              onChange={(e) => setForm({ ...form, role: e.target.value })}
-              className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] p-3 text-sm text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] transition-all font-semibold"
-            >
-              <option value="staff">Staff / Engineer</option>
-              <option value="admin">Admin</option>
-              <option value="ceo">CEO / Executive</option>
-            </select>
+              onChange={(next) => setForm({ ...form, role: next })}
+              options={[
+                { value: 'staff', label: 'Staff / Engineer' },
+                { value: 'admin', label: 'Admin' },
+                { value: 'ceo', label: 'CEO / Executive' },
+              ]}
+              ariaLabel="Role"
+              className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] px-3 py-3 text-sm text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] transition-all font-semibold shadow-inner"
+            />
           </div>
 
           <div className="flex gap-3 pt-2">
@@ -792,52 +795,45 @@ function TicketsTab({
                     </button>
                     <div>
                       <label htmlFor="detail-status-select" className="block text-[10px] uppercase text-[var(--muted)] font-extrabold mb-1">Update Status</label>
-                      <select
+                      <SelectDropdown
                         id="detail-status-select"
                         value={selectedTicket?.status || 'New'}
-                        onChange={(e) => selectedTicket?.id && handleStatusChange(selectedTicket.id, e.target.value)}
-                        className="bg-[var(--paper)] border border-[var(--line)] text-[var(--ink)] rounded-xl px-3 py-1 text-xs font-extrabold focus:outline-none focus:border-[var(--accent)] transition-all shadow-sm cursor-pointer"
-                      >
-                        <option value="New">New</option>
-                        <option value="In Progress">In Progress</option>
-                        <option value="Pending Client">Pending Client</option>
-                        <option value="Resolved">Resolved</option>
-                        <option value="Closed">Closed</option>
-                      </select>
+                        onChange={(next) => selectedTicket?.id && handleStatusChange(selectedTicket.id, next)}
+                        options={['New', 'In Progress', 'Pending Client', 'Resolved', 'Closed']}
+                        ariaLabel="Update Status"
+                        className="bg-[var(--paper)] border border-[var(--line)] text-[var(--ink)] rounded-xl px-3 py-1 text-xs font-extrabold focus:outline-none focus:border-[var(--accent)] transition-all shadow-sm"
+                      />
                     </div>
 
                     <div>
                       <label htmlFor="detail-priority-select" className="block text-[10px] uppercase text-[var(--muted)] font-extrabold mb-1">Priority</label>
-                      <select
+                      <SelectDropdown
                         id="detail-priority-select"
                         value={selectedTicket?.priority || 'Medium'}
-                        onChange={(e) => selectedTicket?.id && handlePriorityChange(selectedTicket.id, e.target.value)}
-                        className="bg-[var(--paper)] border border-[var(--line)] text-[var(--ink)] rounded-xl px-3 py-1 text-xs font-extrabold focus:outline-none focus:border-[var(--accent)] transition-all shadow-sm cursor-pointer"
-                      >
-                        {priorities.map((prio) => (
-                          <option key={prio} value={prio}>{prio}</option>
-                        ))}
-                      </select>
+                        onChange={(next) => selectedTicket?.id && handlePriorityChange(selectedTicket.id, next)}
+                        options={priorities}
+                        ariaLabel="Priority"
+                        className="bg-[var(--paper)] border border-[var(--line)] text-[var(--ink)] rounded-xl px-3 py-1 text-xs font-extrabold focus:outline-none focus:border-[var(--accent)] transition-all shadow-sm"
+                      />
                     </div>
 
                     <div>
                       <label htmlFor="detail-staff-select" className="block text-[10px] uppercase text-[var(--muted)] font-extrabold mb-1">Assigned Staff</label>
-                      <select
+                      <SelectDropdown
                         id="detail-staff-select"
                         value={selectedTicket?.assignedToId || ''}
-                        onChange={(e) => {
+                        onChange={(next) => {
                           if (!selectedTicket?.id) return
-                          const staffId = e.target.value
-                          if (!staffId) {
+                          if (!next) {
                             handleAssignStaff(selectedTicket.id, null)
                             return
                           }
-                          const fromList = staffList.find((s) => s.id === staffId)
+                          const fromList = staffList.find((s) => s.id === next)
                           if (fromList) {
                             handleAssignStaff(selectedTicket.id, fromList)
                             return
                           }
-                          if (isUUID(currentUser?.id) && currentUser.id === staffId) {
+                          if (isUUID(currentUser?.id) && currentUser.id === next) {
                             handleAssignStaff(selectedTicket.id, {
                               id: currentUser.id,
                               full_name: currentUser?.fullName || 'Tier-2 Engineer',
@@ -846,35 +842,34 @@ function TicketsTab({
                             })
                             return
                           }
-                          handleAssignStaff(selectedTicket.id, { id: staffId })
+                          handleAssignStaff(selectedTicket.id, { id: next })
                         }}
-                        className="bg-[var(--paper)] border border-[var(--line)] text-[var(--ink)] rounded-xl px-3 py-1 text-xs font-extrabold focus:outline-none focus:border-[var(--accent)] transition-all shadow-sm cursor-pointer"
-                      >
-                        <option value="">Unassigned</option>
-                        {(staffList.length > 0
-                          ? staffList
-                          : (isUUID(currentUser?.id)
-                              ? [{
-                                  id: currentUser.id,
-                                  full_name: currentUser?.fullName || 'Tier-2 Engineer',
-                                  email: currentUser?.email,
-                                  role: currentUser?.role,
-                                }]
-                              : [{
-                                  id: 'currentUser',
-                                  full_name: currentUser?.fullName || 'Tier-2 Engineer',
-                                }])
-                        ).map((s) => {
-                          const nameVal = s.full_name || s.fullName || s.name || s.email
-                          const optionValue = isUUID(s.id) ? s.id : ''
-                          if (!optionValue) return null
-                          return (
-                            <option key={s.id || s.email || nameVal} value={optionValue}>
-                              {nameVal}
-                            </option>
-                          )
-                        })}
-                      </select>
+                        options={[
+                          { value: '', label: 'Unassigned' },
+                          ...(staffList.length > 0
+                            ? staffList
+                            : (isUUID(currentUser?.id)
+                                ? [{
+                                    id: currentUser.id,
+                                    full_name: currentUser?.fullName || 'Tier-2 Engineer',
+                                    email: currentUser?.email,
+                                    role: currentUser?.role,
+                                  }]
+                                : [{
+                                    id: 'currentUser',
+                                    full_name: currentUser?.fullName || 'Tier-2 Engineer',
+                                  }])
+                          ).map((s) => {
+                            const nameVal = s.full_name || s.fullName || s.name || s.email
+                            const optionValue = isUUID(s.id) ? s.id : ''
+                            return optionValue
+                              ? { value: optionValue, label: nameVal }
+                              : null
+                          }).filter(Boolean),
+                        ]}
+                        ariaLabel="Assigned Staff"
+                        className="bg-[var(--paper)] border border-[var(--line)] text-[var(--ink)] rounded-xl px-3 py-1 text-xs font-extrabold focus:outline-none focus:border-[var(--accent)] transition-all shadow-sm"
+                      />
                     </div>
                   </div>
                 </div>

@@ -1621,6 +1621,122 @@ export async function fetchTicketReplies(ticketId) {
 }
 
 /**
+ * Subscribes to real-time presence + typing for a ticket via Supabase Realtime.
+ *
+ * Works across devices/browsers (unlike BroadcastChannel, which is
+ * same-browser-only). Presence is tracked with Realtime `track()` and typing
+ * is sent as channel broadcasts — both delivered to every subscriber of the
+ * per-ticket channel. Multiple callers may subscribe to the same ticket; they
+ * share one underlying channel.
+ *
+ * HMR-safe: the handler set and init flag live ON the channel object (the
+ * supabase client dedupes channels by topic and keeps them across module
+ * reloads), so a Vite hot reload of this file cannot reset them and cause a
+ * second `.on()` on an already-joined channel.
+ *
+ * @param {string} ticketId - Ticket UUID
+ * @param {{ senderName: string, senderRole: string }} self - The current user's identity
+ * @param {Object} handlers
+ * @param {Function} [handlers.onPresence] - (counterparties: Array) fired on presence sync; empty array = counterparty offline
+ * @param {Function} [handlers.onTyping] - (payload: {senderName, senderRole, isTyping}) fired on typing broadcast
+ * @returns {{ unsubscribe: Function, sendTyping: Function, updatePresence: Function }}
+ */
+const PRESENCE_INIT_FLAG = '__netopsPresenceInit'
+const PRESENCE_HANDLERS_FLAG = '__netopsPresenceHandlers'
+
+export function subscribeToTicketPresence(ticketId, self, handlers = {}) {
+  const noop = { unsubscribe: () => {}, sendTyping: () => {}, updatePresence: () => {} }
+  if (!ticketId || !self) return noop
+  if (!(isSupabaseConfigured && supabase)) return noop
+
+  // Deduped by topic: returns the existing channel if this ticket already has
+  // one (including one created by a previous module instance after HMR).
+  const channel = supabase.channel(`ticket_presence_${ticketId}`, { config: { private: true } })
+  const isCounterparty = (role) =>
+    role && self.senderRole && (self.senderRole === 'client') !== (role === 'client')
+
+  // Handler fan-out set attached to the channel object so it survives HMR.
+  if (!channel[PRESENCE_HANDLERS_FLAG]) {
+    channel[PRESENCE_HANDLERS_FLAG] = new Set()
+  }
+  const handlerSet = channel[PRESENCE_HANDLERS_FLAG]
+
+  const handler = { onPresence: handlers.onPresence, onTyping: handlers.onTyping }
+  handlerSet.add(handler)
+
+  // Only the first subscriber registers callbacks — and only if the channel is
+  // not already joined/joining (`.on()` throws after subscribe()).
+  if (!channel[PRESENCE_INIT_FLAG] && channel.state !== 'joined' && channel.state !== 'joining') {
+    channel[PRESENCE_INIT_FLAG] = true
+    channel
+      .on('presence', { event: 'sync' }, () => {
+        const state = channel.presenceState()
+        const counterparties = Object.values(state)
+          .flat()
+          .filter((p) => p && p.ticketId === ticketId && isCounterparty(p.senderRole))
+        handlerSet.forEach((h) => h.onPresence && h.onPresence(counterparties))
+      })
+      .on('broadcast', { event: 'typing' }, ({ payload }) => {
+        if (!payload || payload.ticketId !== ticketId || !isCounterparty(payload.senderRole)) return
+        handlerSet.forEach((h) => h.onTyping && h.onTyping(payload))
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          try {
+            await channel.track({ ticketId, senderName: self.senderName, senderRole: self.senderRole, onlineAt: Date.now() })
+          } catch (err) {
+            logger.warn('Presence track failed:', err)
+          }
+        }
+      })
+  }
+
+  // Refresh presence now if the channel is already live (subsequent subscriber
+  // or HMR re-mount of an existing channel).
+  if (channel.state === 'joined') {
+    try {
+      channel.track({ ticketId, senderName: self.senderName, senderRole: self.senderRole, onlineAt: Date.now() })
+    } catch {}
+  }
+
+  const isJoined = () => channel.state === 'joined'
+
+  const sendTyping = (isTyping) => {
+    // Only push over the WebSocket when joined. channel.send() before join
+    // silently falls back to REST with a deprecation warning per call.
+    if (!isJoined()) return
+    try {
+      channel.send({
+        type: 'broadcast',
+        event: 'typing',
+        payload: { ticketId, senderName: self.senderName, senderRole: self.senderRole, isTyping },
+      })
+    } catch {}
+  }
+
+  const updatePresence = () => {
+    try {
+      channel.track({ ticketId, senderName: self.senderName, senderRole: self.senderRole, onlineAt: Date.now() })
+    } catch {}
+  }
+
+  return {
+    unsubscribe: () => {
+      handlerSet.delete(handler)
+      // Last subscriber leaving: clear our presence so the counterparty sees
+      // us offline. The channel itself stays alive for the page session.
+      if (handlerSet.size === 0 && isJoined()) {
+        try {
+          channel.untrack()
+        } catch {}
+      }
+    },
+    sendTyping,
+    updatePresence,
+  }
+}
+
+/**
  * Subscribes to real-time reply inserts for a ticket via Supabase Realtime or custom events.
  * @param {string} ticketId - Ticket UUID to listen for replies on
  * @param {Function} callback - Invoked with each new reply object

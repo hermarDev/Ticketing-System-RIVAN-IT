@@ -722,10 +722,14 @@
 
 .modal-head {
   align-items: center;
+  background: var(--paper);
   border-bottom: 1px solid var(--line);
   display: flex;
   justify-content: space-between;
   padding: 22px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 
 .modal-head h2 {
@@ -834,10 +838,26 @@ html.dark .success-message {
   border-radius: 8px;
   color: var(--muted);
   display: flex;
-  grid-column: 1 / -1;
+  font-size: 0.82rem;
   gap: 8px;
+  grid-column: 1 / -1;
   margin: 0;
-  padding: 14px;
+  min-width: 0;
+  padding: 12px 14px;
+}
+
+.account-note strong {
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.account-note > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .modal-actions {

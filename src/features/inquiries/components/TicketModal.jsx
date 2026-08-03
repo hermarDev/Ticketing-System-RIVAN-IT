@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { ClipboardCheck, MailCheck, Paperclip, X, Loader2, AlertCircle } from 'lucide-react'
+import { ClipboardCheck, MailCheck, Paperclip, X, Loader2, AlertCircle, BadgeCheck } from 'lucide-react'
 import { requestTypes } from '../../../config/serviceOptions'
 import { Field } from '../../../shared/components/Field'
+import { SelectDropdown } from '../../../shared/components/SelectDropdown'
 import { AddressAutocomplete } from '../../../shared/components/AddressAutocomplete'
 import { validateRequiredFields, isValidEmail } from '../../../lib/formValidation'
 import { createTicket } from '../../../lib/ticketService'
@@ -286,7 +287,10 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
             <form className="ticket-form" onSubmit={handleSubmit} noValidate>
               {account && (
                 <p className="account-note">
-                  Client account <strong>{account.clientId || account.id}</strong> is attached to this ticket.
+                  <BadgeCheck size={16} className="shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                  <span>
+                    Linked to account <strong>{account.clientId || account.id}</strong>
+                  </span>
                 </p>
               )}
               <Field label="First Name" error={errors.firstName}>
@@ -325,22 +329,22 @@ export function TicketModal({ account, isOpen, onClose, onTicketCreated }) {
                 />
               </Field>
               <Field label="Request Type">
-                <select value={form.department} onChange={(event) => updateField('department', event.target.value)}>
-                  {requestTypes.map((requestType) => (
-                    <option key={requestType}>{requestType}</option>
-                  ))}
-                </select>
+                <SelectDropdown
+                  value={form.department}
+                  onChange={(next) => updateField('department', next)}
+                  options={requestTypes}
+                  ariaLabel="Request Type"
+                  className="w-full min-h-[46px] rounded-lg border border-[var(--line)] bg-[var(--bg)] px-[13px] py-3 text-left text-[var(--ink)] font-[650] shadow-none"
+                />
               </Field>
               <Field label="Urgency / Work Impact">
-                <select
+                <SelectDropdown
                   value={form.clientUrgency}
-                  onChange={(event) => updateField('clientUrgency', event.target.value)}
-                  aria-label="Reported urgency / work impact"
-                >
-                  {URGENCY_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
+                  onChange={(next) => updateField('clientUrgency', next)}
+                  options={URGENCY_OPTIONS}
+                  ariaLabel="Reported urgency / work impact"
+                  className="w-full min-h-[46px] rounded-lg border border-[var(--line)] bg-[var(--bg)] px-[13px] py-3 text-left text-[var(--ink)] font-[650] shadow-none"
+                />
               </Field>
               <Field label="Subject" error={errors.subject} wide>
                 <input value={form.subject} onChange={(event) => updateField('subject', event.target.value)} required />
