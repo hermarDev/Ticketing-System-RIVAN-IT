@@ -10,12 +10,18 @@ import {
   Ticket,
   ChevronRight,
   Inbox,
+  Volume2,
+  Radio,
 } from 'lucide-react'
 import {
   getNotificationLogs,
   markNotificationAsRead,
   markAllNotificationsAsRead,
   clearNotificationLogs,
+  requestNotificationPermission,
+  getNotificationPermissionState,
+  playNotificationSound,
+  dispatchNotification,
 } from '../../lib/notificationService'
 
 function formatRelativeTime(isoString) {
@@ -35,9 +41,33 @@ function formatRelativeTime(isoString) {
 export function NotificationActivityDrawer({ isOpen, onClose, onSelectTicket }) {
   const [logs, setLogs] = useState([])
   const [filter, setFilter] = useState('all') // 'all' | 'unread' | 'chat' | 'status'
+  const [permState, setPermState] = useState(() => getNotificationPermissionState())
 
   const refreshLogs = () => {
     setLogs(getNotificationLogs())
+    setPermState(getNotificationPermissionState())
+  }
+
+  const handleEnableDesktopAlerts = async () => {
+    const perm = await requestNotificationPermission()
+    setPermState(perm)
+    playNotificationSound('chat')
+    dispatchNotification({
+      title: 'Desktop Alerts Enabled',
+      message: 'You will now receive native desktop & audio alerts for new client chat messages.',
+      type: 'chat',
+      allowActive: true,
+    })
+  }
+
+  const handleTestChime = () => {
+    playNotificationSound('chat')
+    dispatchNotification({
+      title: 'Notification Sound Test',
+      message: 'Live chat chime audio is operational!',
+      type: 'chat',
+      allowActive: true,
+    })
   }
 
   useEffect(() => {
@@ -186,6 +216,33 @@ export function NotificationActivityDrawer({ isOpen, onClose, onSelectTicket }) 
                     <Trash2 size={16} />
                   </button>
                 )}
+              </div>
+            </div>
+
+            {/* Desktop Notification & Sound Control Bar */}
+            <div className="p-2 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200/80 dark:border-indigo-800/80 flex items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 min-w-0">
+                <Radio size={15} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
+                <span className="font-bold text-slate-800 dark:text-slate-200 truncate">
+                  Desktop Alerts: {permState === 'granted' ? 'Enabled ✅' : 'Disabled 🔔'}
+                </span>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                {permState !== 'granted' && (
+                  <button
+                    onClick={handleEnableDesktopAlerts}
+                    className="px-2.5 py-1 rounded-lg bg-indigo-600 text-white text-[11px] font-black hover:bg-indigo-700 transition-colors shadow-xs"
+                  >
+                    Enable
+                  </button>
+                )}
+                <button
+                  onClick={handleTestChime}
+                  className="p-1 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 transition-colors"
+                  title="Test Notification Sound Chime"
+                >
+                  <Volume2 size={14} />
+                </button>
               </div>
             </div>
           </div>

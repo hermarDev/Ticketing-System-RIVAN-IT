@@ -1558,11 +1558,20 @@ export function AdminDashboard({ currentUser, onUpdateCurrentUser, onClose }) {
 
   useEffect(() => {
     refreshUnreadCount()
+    const handleOpenTicketEvent = (e) => {
+      if (e.detail?.ticketId) {
+        handleSelectTicketGlobal(e.detail.ticketId)
+      }
+    }
+
     window.addEventListener('netops_notification_log_updated', refreshUnreadCount)
     window.addEventListener('netops_notification_received', refreshUnreadCount)
+    window.addEventListener('netops_open_ticket', handleOpenTicketEvent)
+
     return () => {
       window.removeEventListener('netops_notification_log_updated', refreshUnreadCount)
       window.removeEventListener('netops_notification_received', refreshUnreadCount)
+      window.removeEventListener('netops_open_ticket', handleOpenTicketEvent)
     }
   }, [refreshUnreadCount])
 
@@ -1590,13 +1599,16 @@ export function AdminDashboard({ currentUser, onUpdateCurrentUser, onClose }) {
       loadTickets()
     })
 
-    const unsubscribeReplies = subscribeToGlobalReplies(currentUser?.role || 'staff')
+    const unsubscribeReplies = subscribeToGlobalReplies(
+      currentUser?.role || 'staff',
+      currentUser?.fullName || currentUser?.name
+    )
 
     return () => {
       unsubscribeTickets()
       unsubscribeReplies()
     }
-  }, [loadTickets, loadStaffMembers, currentUser?.role])
+  }, [loadTickets, loadStaffMembers, currentUser?.role, currentUser?.fullName, currentUser?.name])
 
   const handleSelectTicketGlobal = async (idOrTicket) => {
     if (!idOrTicket) return

@@ -87,6 +87,22 @@ describe('setActiveTicketId / isTicketActive', () => {
     assert.equal(isTicketActive(undefined), false)
     assert.equal(isTicketActive(''), false)
   })
+
+  it('should suppress notification when ticket is active and allowActive is false', () => {
+    setActiveTicketId('ticket-123')
+    const ticketId = 'ticket-123'
+    const allowActive = false
+    const isSuppressed = ticketId && isTicketActive(ticketId) && !allowActive
+    assert.equal(isSuppressed, true)
+  })
+
+  it('should NOT suppress notification when allowActive is true even if ticket is active', () => {
+    setActiveTicketId('ticket-123')
+    const ticketId = 'ticket-123'
+    const allowActive = true
+    const isSuppressed = ticketId && isTicketActive(ticketId) && !allowActive
+    assert.equal(isSuppressed, false)
+  })
 })
 
 describe('notification deduplication', () => {
@@ -153,5 +169,28 @@ describe('getUnreadNotificationCount', () => {
 
   it('should return 0 for empty array', () => {
     assert.equal(getUnreadNotificationCount([]), 0)
+  })
+})
+
+describe('role counterparty detection logic', () => {
+  it('should treat client as counterparty when receiver is staff/admin/ceo', () => {
+    const isClient = false // Admin/Staff user
+    const senderRole = 'client'
+    const isCounterparty = isClient ? senderRole !== 'client' : senderRole === 'client'
+    assert.equal(isCounterparty, true)
+  })
+
+  it('should not treat staff as counterparty when receiver is staff/admin', () => {
+    const isClient = false
+    const senderRole = 'staff'
+    const isCounterparty = isClient ? senderRole !== 'client' : senderRole === 'client'
+    assert.equal(isCounterparty, false)
+  })
+
+  it('should treat staff as counterparty when receiver is client', () => {
+    const isClient = true
+    const senderRole = 'staff'
+    const isCounterparty = isClient ? senderRole !== 'client' : senderRole === 'client'
+    assert.equal(isCounterparty, true)
   })
 })

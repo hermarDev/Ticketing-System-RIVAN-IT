@@ -145,7 +145,10 @@ export function ClientDashboardPage({ clientAccount, isGoogleUser, onLogout, onU
       requestTicketsRefresh()
     })
 
-    const unsubscribeReplies = subscribeToGlobalReplies('client')
+    const unsubscribeReplies = subscribeToGlobalReplies(
+      'client',
+      clientAccount?.fullName || clientAccount?.name
+    )
 
     const mergeOpenTicketFromPayload = (payload) => {
       if (!payload?.ticketId) return
@@ -216,7 +219,7 @@ export function ClientDashboardPage({ clientAccount, isGoogleUser, onLogout, onU
         refreshTimerRef.current = null
       }
     }
-  }, [loadTickets, requestTicketsRefresh])
+  }, [loadTickets, requestTicketsRefresh, clientAccount?.fullName, clientAccount?.name])
 
   const handleTicketCreated = (newTicket) => {
     if (!newTicket) return
@@ -296,6 +299,14 @@ export function ClientDashboardPage({ clientAccount, isGoogleUser, onLogout, onU
     }
   }
 
+  // Client-POV status labels: converts internal status names to user-friendly first-person text
+  const getClientStatusLabel = (status) => {
+    switch (status) {
+      case 'Pending Client': return 'Awaiting Your Response'
+      default: return status
+    }
+  }
+
   const navItems = [
     { id: 'overview', label: 'Overview & Metrics', icon: BarChart3 },
     { id: 'tickets', label: 'Tickets Queue', icon: Inbox, badge: stats.total },
@@ -360,9 +371,9 @@ export function ClientDashboardPage({ clientAccount, isGoogleUser, onLogout, onU
             {clientAccount?.fullName?.charAt(0) || 'C'}
           </span>
           <div className="flex-1 min-w-0">
-            <p className="text-xs font-black text-[var(--ink)] truncate">{clientAccount?.fullName || 'Client'}</p>
+            <p className="text-xs font-black text-[var(--ink)] truncate">{clientAccount?.fullName || 'My Account'}</p>
             <p className="text-[10px] text-[var(--muted)] font-bold truncate">
-              {clientAccount?.clientId || 'CLIENT'} · {clientAccount?.companyName || 'Company'}
+              {clientAccount?.clientId || 'Account'} · {clientAccount?.companyName || 'Company'}
             </p>
           </div>
         </div>
@@ -523,7 +534,7 @@ export function ClientDashboardPage({ clientAccount, isGoogleUser, onLogout, onU
                         </span>
                       </div>
                       <h2 className="text-2xl sm:text-3xl font-black text-slate-950 dark:text-white tracking-tight">
-                        Welcome back, {clientAccount?.fullName || 'Client'}! 👋
+                        Welcome back, {clientAccount?.fullName || 'there'}! 👋
                       </h2>
                       <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 font-medium leading-relaxed">
                         Track all your technical inquiries, launch live chat workspaces with your support engineers, and manage your account details cleanly.
@@ -755,7 +766,7 @@ export function ClientDashboardPage({ clientAccount, isGoogleUser, onLogout, onU
                                       showSuffix={false}
                                     />
                                     <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black border ${getStatusBadgeClass(t.status)}`}>
-                                      ● {t.status}
+                                      ● {getClientStatusLabel(t.status)}
                                     </span>
                                   </div>
                                 </div>

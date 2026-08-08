@@ -1,10 +1,97 @@
 /**
  * Notification Service for NetOps Ticket Desk
  * Synthesizes clean Web Audio chimes for new chat replies and status updates.
- * Provides Toast notification listeners and unread badge counters.
+ * Provides Desktop HTML5 notifications, Toast notification listeners, and unread badge counters.
  */
 
-// Web Audio API Chime Generator (No external audio file download required)
+// Web Audio API Singleton & Auto-Unlock System
+let sharedAudioCtx = null
+
+function getAudioContext() {
+  if (typeof window === 'undefined') return null
+  if (!sharedAudioCtx) {
+    const AudioCtxClass = window.AudioContext || window.webkitAudioContext
+    if (AudioCtxClass) {
+      sharedAudioCtx = new AudioCtxClass()
+    }
+  }
+  if (sharedAudioCtx && sharedAudioCtx.state === 'suspended') {
+    sharedAudioCtx.resume().catch(() => {})
+  }
+  return sharedAudioCtx
+}
+
+// Auto-unlock Web Audio on user gesture anywhere on the window
+if (typeof window !== 'undefined') {
+  const unlockAudio = () => {
+    if (sharedAudioCtx && sharedAudioCtx.state === 'suspended') {
+      sharedAudioCtx.resume().catch(() => {})
+    }
+  }
+  window.addEventListener('click', unlockAudio, { passive: true })
+  window.addEventListener('keydown', unlockAudio, { passive: true })
+  window.addEventListener('touchstart', unlockAudio, { passive: true })
+  window.addEventListener('pointerdown', unlockAudio, { passive: true })
+}
+
+/**
+ * Requests browser HTML5 notification permissions.
+ * @returns {Promise<string>} 'granted' | 'denied' | 'default'
+ */
+export async function requestNotificationPermission() {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return 'denied'
+  }
+  try {
+    const perm = await Notification.requestPermission()
+    return perm
+  } catch {
+    return Notification.permission || 'denied'
+  }
+}
+
+/**
+ * Checks current browser desktop notification permission state.
+ * @returns {string} 'granted' | 'denied' | 'default' | 'unsupported'
+ */
+export function getNotificationPermissionState() {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return 'unsupported'
+  }
+  return Notification.permission
+}
+
+/**
+ * Dispatches a native browser desktop notification if permission is granted.
+ * @param {Object} options
+ * @param {string} options.title
+ * @param {string} options.message
+ * @param {string} [options.ticketId]
+ */
+export function sendDesktopNotification({ title, message, ticketId }) {
+  if (typeof window === 'undefined' || !('Notification' in window)) return
+  if (Notification.permission !== 'granted') return
+
+  try {
+    const notif = new Notification(title, {
+      body: message,
+      icon: '/favicon.ico',
+      tag: ticketId ? `netops-ticket-${ticketId}` : undefined,
+      renotify: true,
+    })
+
+    notif.onclick = () => {
+      window.focus()
+      if (ticketId) {
+        window.dispatchEvent(new CustomEvent('netops_open_ticket', { detail: { ticketId } }))
+      }
+      notif.close()
+    }
+  } catch {
+    // silent fallback if Notification constructor throws in restricted contexts
+  }
+}
+
 /**
  * Plays a Web Audio API chime for the given notification type.
  * @param {'chat'|'status'} [type='chat'] - Type of chime to play
@@ -14,10 +101,9 @@ export function playNotificationSound(type = 'chat') {
   if (typeof window === 'undefined') return
 
   try {
-    const AudioContext = window.AudioContext || window.webkitAudioContext
-    if (!AudioContext) return
+    const ctx = getAudioContext()
+    if (!ctx) return
 
-    const ctx = new AudioContext()
     const osc = ctx.createOscillator()
     const gain = ctx.createGain()
 
@@ -33,7 +119,7 @@ export function playNotificationSound(type = 'chat') {
       osc.frequency.exponentialRampToValueAtTime(987.77, now + 0.1) // B5
 
       gain.gain.setValueAtTime(0, now)
-      gain.gain.linearRampToValueAtTime(0.15, now + 0.02)
+      gain.gain.linearRampToValueAtTime(0.2, now + 0.02)
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35)
 
       osc.start(now)
@@ -46,18 +132,18 @@ export function playNotificationSound(type = 'chat') {
       osc.frequency.setValueAtTime(783.99, now + 0.16)
 
       gain.gain.setValueAtTime(0, now)
-      gain.gain.linearRampToValueAtTime(0.12, now + 0.02)
+      gain.gain.linearRampToValueAtTime(0.15, now + 0.02)
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45)
 
       osc.start(now)
       osc.stop(now + 0.45)
     }
-  } catch (err) {
+  } catch {
     // Web Audio blocked before user interaction — silent fallback
   }
 }
 
-// Idempotency cache to prevent duplicate notifications within 3 seconds
+// Idempotency cache to prevent duplicate notifications within 5 seconds
 const recentNotifications = new Map()
 
 // Active ticket IDs set to suppress toasts when user is actively inside the chatbox
@@ -92,19 +178,20 @@ export function isTicketActive(ticketId) {
 }
 
 /**
- * Dispatches a live notification toast, persists it to the log, and plays an audio chime.
+ * Dispatches a live notification toast, persists it to the log, sends desktop alert, and plays an audio chime.
  * @param {Object} options - Notification options
  * @param {string} options.title - Notification title
  * @param {string} options.message - Notification body message
  * @param {'chat'|'status'|'info'} [options.type='info'] - Notification type
  * @param {string} [options.ticketId] - Related ticket ID for suppression checks
+ * @param {boolean} [options.allowActive=false] - If true, dispatches notification even if ticket is currently active
  * @returns {Object|null} Created notification payload, or null if suppressed/deduplicated
  */
-export function dispatchNotification({ title, message, type = 'info', ticketId }) {
+export function dispatchNotification({ title, message, type = 'info', ticketId, allowActive = false }) {
   if (typeof window === 'undefined') return null
 
-  // Context-aware suppression: Do NOT show toast or chime if user is actively in the chatbox for this ticket
-  if (ticketId && activeTicketIds.has(String(ticketId))) {
+  // Context-aware suppression: Do NOT show toast or chime if user is actively in the chatbox for this ticket, unless allowActive is true
+  if (ticketId && activeTicketIds.has(String(ticketId)) && !allowActive) {
     return null
   }
 
@@ -147,8 +234,23 @@ export function dispatchNotification({ title, message, type = 'info', ticketId }
   // Play audio chime
   playNotificationSound(type === 'status' ? 'status' : 'chat')
 
+  // Send Desktop HTML5 notification
+  sendDesktopNotification({ title: cleanTitle, message: cleanMsg, ticketId })
+
   // Dispatch custom browser event for reactive UI toasts
   window.dispatchEvent(new CustomEvent('netops_notification_received', { detail: payload }))
+
+  // Cross-tab relay: broadcast notification to other browser tabs/windows
+  try {
+    if ('BroadcastChannel' in window) {
+      const bc = new BroadcastChannel('netops_notifications')
+      bc.postMessage({ type: 'CROSS_TAB_NOTIFICATION', payload })
+      setTimeout(() => bc.close(), 500)
+    }
+  } catch {
+    // silent — BroadcastChannel unsupported or blocked
+  }
+
   return payload
 }
 
@@ -164,7 +266,7 @@ export function getNotificationLogs() {
   try {
     const raw = localStorage.getItem(NOTIFICATION_LOG_KEY)
     return raw ? JSON.parse(raw) : []
-  } catch (e) {
+  } catch {
     return []
   }
 }
@@ -179,7 +281,7 @@ export function saveNotificationLogs(logs) {
   try {
     localStorage.setItem(NOTIFICATION_LOG_KEY, JSON.stringify(logs.slice(0, 50)))
     window.dispatchEvent(new CustomEvent('netops_notification_log_updated', { detail: logs }))
-  } catch (e) {
+  } catch {
     // silent fallback
   }
 }
@@ -224,3 +326,4 @@ export function getUnreadNotificationCount() {
   const logs = getNotificationLogs()
   return logs.filter((n) => !n.read).length
 }
+

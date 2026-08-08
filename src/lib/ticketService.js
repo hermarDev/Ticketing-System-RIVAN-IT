@@ -1024,9 +1024,25 @@ export async function createTicket(ticketData) {
       recentTicketSubmissions.set(cacheKey, { timestamp: now, ticket: createdTicket })
       pruneRecentTicketSubmissions()
 
-      // Dispatch custom event for real-time reactive updates
+      // Dispatch custom events and broadcast for real-time reactive updates across tabs/windows
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('netops_ticket_updated', { detail: createdTicket }))
+        window.dispatchEvent(new CustomEvent('netops_ticket_created', { detail: createdTicket }))
+        try {
+          const bc = new BroadcastChannel('netops_live_chat')
+          bc.postMessage({ type: 'NEW_TICKET', ticket: createdTicket })
+          setTimeout(() => bc.close(), 1000)
+        } catch {}
+
+        // Notify admins of new client ticket/inquiry submission
+        const displayClient = createdTicket.clientName || createdTicket.email || 'Client'
+        dispatchNotification({
+          title: `New Ticket #${createdTicket.ticketNumber || ''}`,
+          message: `${displayClient}: ${createdTicket.subject || createdTicket.description || 'New inquiry'}`,
+          type: 'chat',
+          ticketId: createdTicket.id,
+          allowActive: true,
+        })
       }
       return createdTicket
     }
@@ -1057,6 +1073,22 @@ export async function createTicket(ticketData) {
   pruneRecentTicketSubmissions()
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('netops_ticket_updated', { detail: newTicket }))
+    window.dispatchEvent(new CustomEvent('netops_ticket_created', { detail: newTicket }))
+    try {
+      const bc = new BroadcastChannel('netops_live_chat')
+      bc.postMessage({ type: 'NEW_TICKET', ticket: newTicket })
+      setTimeout(() => bc.close(), 1000)
+    } catch {}
+
+    // Notify admins of new client ticket/inquiry submission in local mode
+    const displayClient = newTicket.clientName || newTicket.email || 'Client'
+    dispatchNotification({
+      title: `New Ticket #${newTicket.ticketNumber || ''}`,
+      message: `${displayClient}: ${newTicket.subject || newTicket.description || 'New inquiry'}`,
+      type: 'chat',
+      ticketId: newTicket.id,
+      allowActive: true,
+    })
   }
   return newTicket
 }
@@ -1770,7 +1802,11 @@ export function subscribeToTicketReplies(ticketId, callback) {
           }
         }
       )
-      .subscribe()
+      .subscribe((status, err) => {
+        if (status === 'CHANNEL_ERROR') {
+          logger.warn('Supabase Realtime ticket replies subscription channel error:', err)
+        }
+      })
 
     return () => {
       supabase.removeChannel(channel)
@@ -1808,7 +1844,11 @@ export function subscribeToAllTickets(callback) {
           if (callback) callback(payload)
         }
       )
-      .subscribe()
+      .subscribe((status, err) => {
+        if (status === 'CHANNEL_ERROR') {
+          logger.warn('Supabase Realtime all tickets subscription channel error:', err)
+        }
+      })
 
     return () => {
       supabase.removeChannel(channel)
@@ -2039,26 +2079,59 @@ export async function getClientGmailSettings(userId) {
 
 /**
  * Subscribes globally to all incoming ticket replies and dispatches toast notifications for counterparty messages.
- * @param {string} [currentUserRole='client'] - Role of the current user ('client', 'staff', 'admin')
+ * @param {string|Object} [currentUserRole='client'] - Role of the current user ('client', 'staff', 'admin') or options object
+ * @param {string|null} [currentUserName=null] - Display name of the current user to prevent self-notification
  * @returns {Function} Unsubscribe function that cleans up all listeners and channels
  */
-export function subscribeToGlobalReplies(currentUserRole = 'client') {
-  const isClient = currentUserRole === 'client'
+export function subscribeToGlobalReplies(currentUserRole = 'client', currentUserName = null) {
+  const role = typeof currentUserRole === 'object' ? currentUserRole?.role : currentUserRole
+  const name = typeof currentUserRole === 'object' ? (currentUserRole?.name || currentUserRole?.fullName) : currentUserName
+
+  const userRole = role || 'client'
+  const isClient = userRole === 'client'
+  const cleanCurrentName = name ? String(name).trim().toLowerCase() : ''
 
   const handleIncomingReply = (reply) => {
     if (!reply || !reply.message) return
-    const senderRole = reply.senderRole || reply.sender_role
-    // Only notify if message was sent by counterparty
-    if ((isClient && senderRole !== 'client') || (!isClient && senderRole === 'client')) {
+    const rawSenderRole = reply.senderRole || reply.sender_role
+    const senderRole = String(rawSenderRole || 'client').trim().toLowerCase()
+    const senderName = reply.senderName || reply.sender_name
+
+    const cleanSenderName = senderName ? String(senderName).trim().toLowerCase() : ''
+    const isSameRole = isClient ? senderRole === 'client' : senderRole !== 'client'
+
+    // 1. Prevent self-notification: only suppress if sender has the same role type AND matching display name
+    if (isSameRole && cleanCurrentName && cleanSenderName && cleanSenderName === cleanCurrentName) {
+      return
+    }
+
+    // 2. Determine if message is from a counterparty:
+    //    For Client: counterparty is non-client ('staff', 'admin', 'ceo')
+    //    For Staff/Admin/CEO: counterparty is client ('client')
+    const isCounterparty = isClient ? senderRole !== 'client' : senderRole === 'client'
+
+    if (isCounterparty) {
+      const displaySender = senderName || (isClient ? 'Support Engineer' : 'Client')
       dispatchNotification({
-        title: isClient
-          ? `New message from ${reply.senderName || 'Support Engineer'}`
-          : `New message from ${reply.senderName || 'Client'}`,
+        title: `New message from ${displaySender}`,
         message: reply.message,
         type: 'chat',
         ticketId: reply.ticketId || reply.ticket_id,
+        allowActive: true,
       })
     }
+  }
+
+  const handleIncomingTicket = (ticket) => {
+    if (!ticket || isClient) return
+    const displayClient = ticket.clientName || ticket.client_name || ticket.email || 'Client'
+    dispatchNotification({
+      title: `New Ticket #${ticket.ticketNumber || ticket.ticket_number || ''}`,
+      message: `${displayClient}: ${ticket.subject || ticket.description || 'New ticket submitted'}`,
+      type: 'chat',
+      ticketId: ticket.id,
+      allowActive: true,
+    })
   }
 
   // 1. Listen to BroadcastChannel across browser tabs/windows
@@ -2069,21 +2142,19 @@ export function subscribeToGlobalReplies(currentUserRole = 'client') {
       broadcastChannel.onmessage = (event) => {
         if (event.data?.type === 'NEW_REPLY' && event.data?.message) {
           handleIncomingReply(event.data.message)
+        } else if (event.data?.type === 'NEW_TICKET' && event.data?.ticket) {
+          handleIncomingTicket(event.data.ticket)
         }
       }
     }
-  } catch (err) {
+  } catch {
     // silent
   }
 
   // 2. Listen to Supabase Realtime postgres changes on `ticket_replies` table
-  // Server-side filter matches counterparty logic; handleIncomingReply remains a safety net.
   let supabaseChannel = null
   if (isSupabaseConfigured && supabase) {
     const channelName = `global_chat_replies_${crypto.randomUUID()}`
-    const replyFilter = isClient
-      ? 'sender_role=neq.client'
-      : 'sender_role=eq.client'
     supabaseChannel = supabase
       .channel(channelName)
       .on(
@@ -2092,7 +2163,6 @@ export function subscribeToGlobalReplies(currentUserRole = 'client') {
           event: 'INSERT',
           schema: 'public',
           table: 'ticket_replies',
-          filter: replyFilter,
         },
         (payload) => {
           if (payload.new) {
@@ -2107,15 +2177,23 @@ export function subscribeToGlobalReplies(currentUserRole = 'client') {
           }
         }
       )
-      .subscribe()
+      .subscribe((status, err) => {
+        if (status === 'CHANNEL_ERROR') {
+          logger.warn('Supabase Realtime global replies subscription channel error:', err)
+        }
+      })
   }
 
   // 3. Listen to local event bus for in-window updates
   const handleLocalReply = (e) => {
     if (e.detail) handleIncomingReply(e.detail)
   }
+  const handleLocalTicket = (e) => {
+    if (e.detail) handleIncomingTicket(e.detail)
+  }
   if (typeof window !== 'undefined') {
     window.addEventListener('netops_reply_added', handleLocalReply)
+    window.addEventListener('netops_ticket_created', handleLocalTicket)
   }
 
   return () => {
@@ -2123,6 +2201,7 @@ export function subscribeToGlobalReplies(currentUserRole = 'client') {
     if (supabaseChannel && supabase) supabase.removeChannel(supabaseChannel)
     if (typeof window !== 'undefined') {
       window.removeEventListener('netops_reply_added', handleLocalReply)
+      window.removeEventListener('netops_ticket_created', handleLocalTicket)
     }
   }
 }

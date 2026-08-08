@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { 
   Send, Loader2, MessageSquare, Headphones, User, ShieldCheck, Paperclip, X, UploadCloud, 
-  Download, FileText, FileSpreadsheet, FileArchive, FileCode, File 
+  Download, FileText, FileSpreadsheet, FileArchive, FileCode, File, ChevronDown
 } from 'lucide-react'
 import { fetchTicketReplies, addTicketReply, subscribeToTicketReplies, subscribeToTicketPresence } from '../../lib/ticketService'
 import { dispatchNotification, setActiveTicketId } from '../../lib/notificationService'
@@ -33,8 +33,10 @@ export function TicketChatThread({
   const [attachment, setAttachment] = useState(null)
   const [isDraggingOver, setIsDraggingOver] = useState(false)
   const [lightboxImage, setLightboxImage] = useState(null)
-  const fileInputRef = useRef(null)
+  const [userHasScrolledUp, setUserHasScrolledUp] = useState(false)
 
+  const fileInputRef = useRef(null)
+  const scrollContainerRef = useRef(null)
   const messagesEndRef = useRef(null)
   const typingTimerRef = useRef(null)
   const typingExpireRef = useRef(null)
@@ -47,9 +49,53 @@ export function TicketChatThread({
     }
   }, [ticketId])
 
-  const scrollToBottom = (behavior = 'smooth') => {
-    messagesEndRef.current?.scrollIntoView({ behavior })
+  useEffect(() => {
+    setUserHasScrolledUp(false)
+  }, [ticketId])
+
+  const scrollToBottom = useCallback((behavior = 'smooth') => {
+    const doScroll = () => {
+      if (scrollContainerRef.current) {
+        const container = scrollContainerRef.current
+        if (behavior === 'auto' || behavior === 'instant') {
+          container.scrollTop = container.scrollHeight
+        } else {
+          container.scrollTo({
+            top: container.scrollHeight,
+            behavior: 'smooth',
+          })
+        }
+      }
+      messagesEndRef.current?.scrollIntoView({
+        behavior: behavior === 'auto' ? 'auto' : 'smooth',
+        block: 'end',
+      })
+    }
+
+    doScroll()
+    requestAnimationFrame(doScroll)
+    const t1 = setTimeout(doScroll, 60)
+    const t2 = setTimeout(doScroll, 180)
+
+    return () => {
+      clearTimeout(t1)
+      clearTimeout(t2)
+    }
+  }, [])
+
+  const handleScroll = () => {
+    if (!scrollContainerRef.current) return
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current
+    const isScrolledUp = scrollHeight - scrollTop - clientHeight > 80
+    setUserHasScrolledUp(isScrolledUp)
   }
+
+  useEffect(() => {
+    if (loading) return
+    if (!userHasScrolledUp) {
+      scrollToBottom(messages.length <= 1 ? 'auto' : 'smooth')
+    }
+  }, [messages, loading, typingUser, userHasScrolledUp, scrollToBottom])
 
   const isImageFile = (name = '', type = '') => {
     if (type && type.startsWith('image/')) return true
@@ -69,7 +115,7 @@ export function TicketChatThread({
     return ext || 'FILE'
   }
 
-  const getDocumentIcon = (name = '', type = '') => {
+  const getDocumentIcon = (name = '') => {
     const ext = name.split('.').pop().toLowerCase()
     if (ext === 'pdf') return FileText
     if (['doc', 'docx', 'txt', 'log'].includes(ext)) return FileText
@@ -310,13 +356,20 @@ export function TicketChatThread({
       setMessages((prev) => (JSON.stringify(prev) === JSON.stringify(data) ? prev : data))
       if (showLoading) {
         setLoading(false)
-        setTimeout(() => scrollToBottom('auto'), 50)
+        setUserHasScrolledUp(false)
+        scrollToBottom('auto')
       }
     }
 
     const notifyIncoming = (incomingMsg) => {
       if (isCounterpartyRole(incomingMsg.senderRole)) {
-        dispatchNotification({ title: `New message from ${incomingMsg.senderName || 'Support'}`, message: incomingMsg.message, type: 'chat', ticketId })
+        dispatchNotification({
+          title: `New message from ${incomingMsg.senderName || 'Support'}`,
+          message: incomingMsg.message,
+          type: 'chat',
+          ticketId,
+          allowActive: true,
+        })
       }
     }
 
@@ -436,7 +489,7 @@ export function TicketChatThread({
       emitPresence(false)
       cleanup.then((fn) => fn && fn())
     }
-  }, [ticketId, senderRole, senderName, emitPresence])
+  }, [ticketId, senderRole, senderName, emitPresence, scrollToBottom])
 
   const handleSend = async (e) => {
     if (e) e.preventDefault()
@@ -444,6 +497,7 @@ export function TicketChatThread({
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
     emitTyping(false)
 
+    setUserHasScrolledUp(false)
     setSending(true)
     const msgText = text.trim()
     const attachPayload = attachment ? JSON.stringify({ url: attachment.url, name: attachment.name, size: attachment.size, isImage: attachment.isImage }) : null
@@ -453,7 +507,7 @@ export function TicketChatThread({
     setMessages((prev) => [...prev, tempMsg])
     setText('')
     setAttachment(null)
-    setTimeout(() => scrollToBottom('smooth'), 0)
+    scrollToBottom('smooth')
 
     try {
       const newMsg = await addTicketReply(ticketId, senderName, senderRole, msgText, attachPayload || attachment?.url)
@@ -461,7 +515,7 @@ export function TicketChatThread({
       try {
         const chatChannel = new BroadcastChannel('netops_live_chat')
         chatChannel.postMessage({ type: 'NEW_REPLY', message: newMsg })
-        chatChannel.close()
+        setTimeout(() => chatChannel.close(), 1000)
       } catch {}
       window.dispatchEvent(new CustomEvent('netops_reply_added', { detail: newMsg }))
       if (onMessageSent) onMessageSent(newMsg)
@@ -485,10 +539,22 @@ export function TicketChatThread({
     try { return new Date(isoString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) } catch { return '' }
   }
 
-  const roleBadges = {
-    client: { label: 'Client', icon: User, style: 'bg-slate-100 text-slate-800 border-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700' },
-    staff: { label: 'Support Engineer', icon: Headphones, style: 'bg-blue-50 text-blue-800 border-blue-200 dark:bg-blue-950/80 dark:text-blue-200 dark:border-blue-800/80' },
-    admin: { label: 'Administrator', icon: ShieldCheck, style: 'bg-indigo-50 text-indigo-800 border-indigo-200 dark:bg-indigo-950/80 dark:text-indigo-200 dark:border-indigo-800/80' },
+  const roleBadgeStyles = {
+    client: { icon: User, style: 'bg-slate-100 text-slate-800 border-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700' },
+    staff: { icon: Headphones, style: 'bg-blue-50 text-blue-800 border-blue-200 dark:bg-blue-950/80 dark:text-blue-200 dark:border-blue-800/80' },
+    admin: { icon: ShieldCheck, style: 'bg-indigo-50 text-indigo-800 border-indigo-200 dark:bg-indigo-950/80 dark:text-indigo-200 dark:border-indigo-800/80' },
+  }
+
+  // Context-aware badge labels: shows "You" for own messages from the user's POV
+  const getBadgeLabel = (msgSenderRole) => {
+    const isOwnSide = senderRole === 'client'
+      ? msgSenderRole === 'client'
+      : msgSenderRole !== 'client'
+    if (isOwnSide) return 'You'
+    // Counterparty labels
+    if (msgSenderRole === 'client') return 'Client'
+    if (msgSenderRole === 'admin') return 'Administrator'
+    return 'Support Engineer'
   }
 
   const isCounterpartyOnline = Boolean(
@@ -497,7 +563,7 @@ export function TicketChatThread({
     Date.now() - counterpartyPresence.lastSeen < 8000
   )
 
-  const counterpartyLabel = senderRole === 'client' ? 'Support Engineer' : 'Client'
+  const counterpartyLabel = senderRole === 'client' ? 'Your Engineer' : 'Client'
 
   const downloadFileToPC = async (fileUrl, fileName = 'attachment') => {
     if (!fileUrl) return
@@ -576,22 +642,23 @@ export function TicketChatThread({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto min-h-0 p-4 space-y-3">
+      <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto min-h-0 p-4 space-y-3 relative">
         {loading ? (
           <div className="flex justify-center py-12"><Loader2 size={24} className="animate-spin text-slate-900 dark:text-slate-100" /></div>
         ) : messages.map((m) => {
           const isSelf = senderRole === 'client' ? m.senderRole === 'client' : m.senderRole !== 'client'
           const isCurrentSender = m.senderRole === senderRole || isSelf
-          const badge = roleBadges[m.senderRole] || roleBadges.client
-          const BadgeIcon = badge.icon
+          const badgeStyle = roleBadgeStyles[m.senderRole] || roleBadgeStyles.client
+          const BadgeIcon = badgeStyle.icon
+          const badgeLabel = getBadgeLabel(m.senderRole)
           const attachMeta = parseAttachmentMeta(m)
 
           return (
             <motion.div key={m.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className={`flex flex-col ${isCurrentSender ? 'items-end' : 'items-start'}`}>
               <div className="flex items-center gap-2 mb-1 px-1">
-                <span className="text-[11px] font-bold text-slate-950 dark:text-white">{m.senderName}</span>
-                <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase border ${badge.style}`}>
-                  <BadgeIcon size={10} className="inline mr-1" /> {badge.label}
+                <span className="text-[11px] font-bold text-slate-950 dark:text-white">{isCurrentSender ? (m.senderName || 'You') : m.senderName}</span>
+                <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase border ${badgeStyle.style}`}>
+                  <BadgeIcon size={10} className="inline mr-1" /> {badgeLabel}
                 </span>
                 <span className="text-[10px] text-slate-500 font-medium">{formatTime(m.createdAt || m.created_at)}</span>
               </div>
@@ -605,7 +672,15 @@ export function TicketChatThread({
                   <div className="mt-2.5 pt-2 border-t border-slate-700/30">
                     {attachMeta.isImage ? (
                       <div className="group relative rounded-xl overflow-hidden border border-slate-300/60 dark:border-slate-700/60 bg-black/5 max-w-xs">
-                        <img src={attachMeta.url} alt="Attachment" className="w-full h-auto max-h-56 object-contain rounded-lg cursor-pointer" onClick={() => setLightboxImage(attachMeta.url)} />
+                        <img
+                          src={attachMeta.url}
+                          alt="Attachment"
+                          onLoad={() => {
+                            if (!userHasScrolledUp) scrollToBottom('smooth')
+                          }}
+                          className="w-full h-auto max-h-56 object-contain rounded-lg cursor-pointer"
+                          onClick={() => setLightboxImage(attachMeta.url)}
+                        />
                         <div className="absolute top-2 right-2 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
                             type="button"
@@ -658,6 +733,25 @@ export function TicketChatThread({
         <div ref={messagesEndRef} />
       </div>
 
+      <AnimatePresence>
+        {userHasScrolledUp && (
+          <motion.button
+            type="button"
+            initial={{ opacity: 0, y: 10, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.95 }}
+            onClick={() => {
+              setUserHasScrolledUp(false)
+              scrollToBottom('smooth')
+            }}
+            className="absolute bottom-20 right-6 z-20 px-3.5 py-2 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-xs shadow-xl flex items-center gap-1.5 transition-all cursor-pointer border border-indigo-400/30"
+          >
+            <ChevronDown size={15} />
+            <span>Recent Messages</span>
+          </motion.button>
+        )}
+      </AnimatePresence>
+
       {/* Real-time Messenger Typing Indicator */}
       <AnimatePresence>
         {typingUser && (
@@ -670,7 +764,7 @@ export function TicketChatThread({
           >
             <div className="flex items-center gap-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-full px-3.5 py-1.5 shadow-xs">
               <span className="text-[11px] font-bold text-slate-800 dark:text-slate-200">
-                {typingUser.senderName || (typingUser.senderRole === 'client' ? 'Client' : 'Support Engineer')} is typing
+                {typingUser.senderName || (senderRole === 'client' ? 'Your Engineer' : 'Client')} is typing
               </span>
               <div className="flex items-center gap-1">
                 <motion.span animate={{ y: [0, -3.5, 0] }} transition={{ repeat: Infinity, duration: 0.6, delay: 0 }} className="size-1.5 rounded-full bg-indigo-600 dark:bg-indigo-400" />

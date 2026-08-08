@@ -1,30 +1,63 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MessageSquare, CheckCircle2, X } from 'lucide-react'
+import { playNotificationSound } from '../../lib/notificationService'
 
 export function NotificationToastContainer({ onSelectTicket }) {
   const [toasts, setToasts] = useState([])
+  const seenIdsRef = useRef(new Set())
 
   useEffect(() => {
-    const handleNotification = (e) => {
-      const notif = e.detail
-      if (!notif) return
+    const addToast = (notif) => {
+      if (!notif || !notif.id) return
+      // Dedup by notification ID
+      if (seenIdsRef.current.has(notif.id)) return
+      seenIdsRef.current.add(notif.id)
+      // Prune old IDs after 30 seconds
+      setTimeout(() => seenIdsRef.current.delete(notif.id), 30000)
 
       setToasts((prev) => {
-        if (prev.some((t) => t.title === notif.title && t.message === notif.message)) {
-          return prev
-        }
+        if (prev.some((t) => t.id === notif.id)) return prev
+        if (prev.some((t) => t.title === notif.title && t.message === notif.message)) return prev
         return [notif, ...prev.slice(0, 3)]
       })
 
-      // Auto dismiss after 5 seconds
+      // Auto dismiss after 6 seconds
       setTimeout(() => {
         setToasts((prev) => prev.filter((t) => t.id !== notif.id))
-      }, 5000)
+      }, 6000)
     }
 
-    window.addEventListener('netops_notification_received', handleNotification)
-    return () => window.removeEventListener('netops_notification_received', handleNotification)
+    // Listen for local notifications dispatched in this tab
+    const handleLocalNotification = (e) => {
+      addToast(e.detail)
+    }
+    window.addEventListener('netops_notification_received', handleLocalNotification)
+
+    // Listen for cross-tab notification relay via BroadcastChannel
+    let notifChannel = null
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        notifChannel = new BroadcastChannel('netops_notifications')
+        notifChannel.onmessage = (event) => {
+          if (event.data?.type === 'CROSS_TAB_NOTIFICATION' && event.data?.payload) {
+            const notif = event.data.payload
+            // Play sound for cross-tab notifications too
+            playNotificationSound(notif.type === 'status' ? 'status' : 'chat')
+            addToast(notif)
+          }
+        }
+      }
+    } catch {
+      // BroadcastChannel unsupported
+    }
+
+    return () => {
+      window.removeEventListener('netops_notification_received', handleLocalNotification)
+      if (notifChannel) {
+        try { notifChannel.close() } catch {}
+      }
+    }
   }, [])
 
   const removeToast = (id) => {
@@ -34,7 +67,7 @@ export function NotificationToastContainer({ onSelectTicket }) {
   if (toasts.length === 0) return null
 
   return (
-    <div className="fixed top-5 right-5 z-[9999] flex flex-col gap-2.5 max-w-sm w-full pointer-events-none px-4 sm:px-0">
+    <div className="fixed top-5 right-5 z-[99999] flex flex-col gap-2.5 max-w-sm w-full pointer-events-none px-4 sm:px-0">
       <AnimatePresence mode="popLayout">
         {toasts.map((t, idx) => (
           <motion.div

@@ -122,7 +122,7 @@ export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, on
       case 'Pending Client':
         return (
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800">
-            <Clock size={13} className="animate-spin" /> {norm}
+            <Clock size={13} className="animate-spin" /> {norm === 'Pending Client' ? 'Awaiting Your Response' : norm}
           </span>
         )
       case 'New':
@@ -347,7 +347,7 @@ export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, on
                 <div className="flex-1 flex flex-col min-h-0 h-full">
                   <TicketChatThread
                     ticketId={ticket.id}
-                    senderName={clientAccount?.fullName || ticket.clientName || 'Client'}
+                    senderName={clientAccount?.fullName || ticket.clientName || 'You'}
                     senderRole="client"
                     placeholder="Ask an engineer or provide additional details..."
                   />
@@ -484,7 +484,7 @@ export function IsolatedTicketModal({ ticket, isOpen, onClose, clientAccount, on
                     { step: 1, title: 'Inquiry Submitted', desc: 'Ticket logged into Network Desk system' },
                     { step: 2, title: 'Engineer Assigned', desc: ticket.assignedTo ? `Assigned to ${ticket.assignedTo}` : 'Awaiting tier-2 engineer assignment' },
                     { step: 3, title: 'Investigation & Resolution in Progress', desc: 'Engineer active on diagnostics & chat' },
-                    { step: 4, title: 'Resolved & Closed', desc: 'Issue resolved and verified by client' },
+                    { step: 4, title: 'Resolved & Closed', desc: 'Issue resolved and verified by you' },
                   ].map((item, idx) => {
                     const isCompleted = currentStep > item.step || (item.step === 4 && isTerminalStatus)
                     const isActive = !isCompleted && currentStep === item.step
